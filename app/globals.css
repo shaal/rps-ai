@@ -1,0 +1,318 @@
+@import "tailwindcss";
+
+@theme {
+  /* Surfaces — a cold, blue-shifted darkness rather than neutral black. */
+  --color-void: #05070c;
+  --color-panel: #0a0f18;
+  --color-raised: #0e1523;
+  --color-line: #1a2534;
+  --color-line-lit: #27384d;
+
+  /* Text */
+  --color-ink: #e6f0f7;
+  --color-dim: #8397ab;
+  --color-faint: #4d6076;
+
+  /* Move hues. Each move owns one colour everywhere it appears — scope nodes,
+     probability bars, glyphs — so the eye learns the mapping in one round. */
+  --color-rock: #ff9f45;
+  --color-paper: #9d8cff;
+  --color-scissors: #2fe0cf;
+
+  /* Outcome hues, deliberately distinct from the move hues. */
+  --color-win: #3ddc97;
+  --color-loss: #ff4f6d;
+  --color-draw: #7b8ea3;
+
+  --color-warn: #ffb454;
+
+  --font-display: var(--font-archivo), system-ui, sans-serif;
+  --font-mono: var(--font-jetbrains), ui-monospace, monospace;
+}
+
+/* ---------------------------------------------------------------- base --- */
+
+html {
+  background: var(--color-void);
+}
+
+body {
+  background: var(--color-void);
+  color: var(--color-ink);
+  font-family: var(--font-display);
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+
+/* Ambient lab atmosphere: two distant light sources over a faint measurement
+   grid. Fixed and non-interactive so it never costs a repaint on scroll. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background:
+    radial-gradient(120vw 70vh at 50% -20%, rgba(47, 224, 207, 0.08), transparent 60%),
+    radial-gradient(70vw 60vh at 100% 110%, rgba(157, 140, 255, 0.07), transparent 60%);
+}
+
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  opacity: 0.5;
+  background-image:
+    repeating-linear-gradient(to right, rgba(38, 56, 77, 0.16) 0 1px, transparent 1px 64px),
+    repeating-linear-gradient(to bottom, rgba(38, 56, 77, 0.16) 0 1px, transparent 1px 64px);
+  mask-image: radial-gradient(100vw 100vh at 50% 30%, #000 20%, transparent 78%);
+}
+
+::selection {
+  background: rgba(47, 224, 207, 0.28);
+  color: var(--color-ink);
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-scissors);
+  outline-offset: 3px;
+  border-radius: 2px;
+}
+
+/* ------------------------------------------------------------ primitives --- */
+
+.panel {
+  background: linear-gradient(180deg, rgba(14, 21, 35, 0.92), rgba(10, 15, 24, 0.92));
+  border: 1px solid var(--color-line);
+  border-radius: 14px;
+  position: relative;
+}
+
+/* Instrument label: the small silkscreened caption on lab equipment. */
+.eyebrow {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--color-faint);
+}
+
+.readout {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.hairline {
+  height: 1px;
+  background: linear-gradient(90deg, var(--color-line), transparent);
+}
+
+/* ---------------------------------------------------------------- throw --- */
+
+.throw {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 22px 12px 16px;
+  border-radius: 16px;
+  border: 1px solid var(--color-line);
+  background: linear-gradient(180deg, rgba(16, 24, 39, 0.9), rgba(9, 14, 23, 0.9));
+  color: var(--color-dim);
+  cursor: pointer;
+  overflow: hidden;
+  transition:
+    transform 140ms cubic-bezier(0.2, 0.8, 0.3, 1),
+    border-color 160ms ease,
+    color 160ms ease,
+    box-shadow 200ms ease;
+}
+
+.throw::after {
+  /* Colour wash that blooms from the bottom on hover. */
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(80% 60% at 50% 115%, var(--throw-hue), transparent 70%);
+  opacity: 0;
+  transition: opacity 200ms ease;
+  pointer-events: none;
+}
+
+.throw:hover:not(:disabled),
+.throw:focus-visible:not(:disabled) {
+  transform: translateY(-3px);
+  border-color: var(--throw-hue);
+  color: var(--color-ink);
+  box-shadow: 0 12px 40px -18px var(--throw-hue);
+}
+
+.throw:hover:not(:disabled)::after,
+.throw:focus-visible:not(:disabled)::after {
+  opacity: 0.22;
+}
+
+.throw:active:not(:disabled) {
+  transform: translateY(-1px) scale(0.985);
+}
+
+.throw:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.throw-key {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  color: var(--color-faint);
+}
+
+/* ----------------------------------------------------------------- bars --- */
+
+.bar-track {
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(38, 56, 77, 0.5);
+  overflow: hidden;
+}
+
+.bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  transition: width 520ms cubic-bezier(0.2, 0.8, 0.3, 1);
+}
+
+/* ------------------------------------------------------------- motion ----- */
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes pop {
+  0% {
+    opacity: 0;
+    transform: scale(0.82);
+  }
+  60% {
+    transform: scale(1.04);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes sweep {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes pulse-ring {
+  0% {
+    opacity: 0.55;
+    transform: scale(0.7);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.5);
+  }
+}
+
+@keyframes shake {
+  10%,
+  90% {
+    transform: translateX(-2px);
+  }
+  20%,
+  80% {
+    transform: translateX(4px);
+  }
+  30%,
+  50%,
+  70% {
+    transform: translateX(-6px);
+  }
+  40%,
+  60% {
+    transform: translateX(6px);
+  }
+}
+
+@keyframes blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@keyframes confetti-fall {
+  0% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) rotate(0deg);
+  }
+  100% {
+    opacity: 0;
+    transform: translate3d(var(--dx), 62vh, 0) rotate(var(--spin));
+  }
+}
+
+.animate-rise {
+  animation: rise 520ms cubic-bezier(0.2, 0.8, 0.3, 1) backwards;
+}
+
+.animate-pop {
+  animation: pop 380ms cubic-bezier(0.2, 0.8, 0.3, 1) backwards;
+}
+
+.animate-shake {
+  animation: shake 460ms cubic-bezier(0.36, 0.07, 0.19, 0.97);
+}
+
+.animate-blink {
+  animation: blink 1.4s ease-in-out infinite;
+}
+
+.scope-sweep {
+  transform-origin: 100px 100px;
+  animation: sweep 1.15s linear infinite;
+}
+
+.confetti-bit {
+  position: absolute;
+  width: 7px;
+  height: 12px;
+  border-radius: 1px;
+  animation: confetti-fall var(--dur) cubic-bezier(0.25, 0.6, 0.4, 1) forwards;
+}
+
+/* Honour the OS setting: keep state changes, drop the movement. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+
+  .throw:hover:not(:disabled) {
+    transform: none;
+  }
+}
