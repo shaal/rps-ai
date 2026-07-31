@@ -13,7 +13,8 @@ machine.
 
 ```bash
 npm install
-npm run dev
+npm run dev          # development
+npm run play         # or: build once and serve, no runtime compilation
 ```
 
 Open http://localhost:3000. The **first ever run downloads ~23MB** of ONNX model
@@ -21,6 +22,43 @@ from HuggingFace into `~/.ruvector/models`; the UI shows a "Loading model" state
 while that happens. Later starts take 1–2s.
 
 Throw with the buttons or the **R / P / S** keys.
+
+### Why `dev` uses webpack rather than Turbopack
+
+Next 16 defaults to Turbopack, which compiles by **forking a node worker** for
+the PostCSS/Tailwind step. This app loads a memory-mapped vector store and an
+ONNX runtime into the dev server, which pushes its *virtual* address space to
+around 65GB (resident memory stays under 1GB). Under Linux's default heuristic
+overcommit, `fork()` from a process that large is refused, and Turbopack dies
+with:
+
+```
+FATAL: An unexpected Turbopack error occurred
+  - [project]/app/globals.css [app-client] (css)
+  - spawning node pooled process
+  - Cannot allocate memory (os error 12)
+```
+
+The failure mode is nasty because it is not random: the first compile succeeds,
+then the vector engine warms up, and **every recompile after that fails** — the
+API keeps answering 200 while `GET /` returns 500.
+
+Webpack runs PostCSS in-process, so it never forks and never hits this.
+Verified: recompiling with the engine fully loaded serves 200 where Turbopack
+returned 500. `npm run dev:turbo` is still there if you want it.
+
+`npm run play` sidesteps compilation entirely by building first, which is the
+most reliable way to just play the game.
+
+If you would rather keep Turbopack, `sudo sysctl vm.overcommit_memory=1` also
+fixes it, at the cost of a machine-wide policy change.
+
+### Only one instance at a time
+
+The database takes an exclusive lock. A second server against the same `./data`
+fails with `Database already open. Cannot acquire lock.`, reported through
+`/api/status` rather than crashing. Startup retries on a 5s cooldown, so once
+the other process exits the game recovers on its own without a restart.
 
 ## How a round works
 

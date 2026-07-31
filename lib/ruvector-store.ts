@@ -92,7 +92,13 @@ export class RuVectorStore implements MemoryStore {
   }
 
   init(): Promise<void> {
-    this.initPromise ??= this.doInit();
+    // The memo is dropped on failure so a later attempt can retry. Opening the
+    // database fails while another instance holds the lock, and that clears the
+    // moment the other process exits — caching it would force a restart.
+    this.initPromise ??= this.doInit().catch((error: unknown) => {
+      this.initPromise = null;
+      throw error;
+    });
     return this.initPromise;
   }
 
