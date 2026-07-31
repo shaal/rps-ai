@@ -111,11 +111,6 @@ export function getStore(): MemoryStore {
   return globalForStore.__rpsStore;
 }
 
-/** Absolute path of the database file currently backing the store. */
-export function memoryFilePath(): string | null {
-  return getStore().filePath();
-}
-
 /**
  * Identifies the current database generation. Changes on reset, which lets a
  * commitment made against the old memory be rejected rather than silently
@@ -444,6 +439,14 @@ function bootstrapReasoning(context: string): Reasoning {
     topNeighbors: [],
     control: null,
   };
+}
+
+/** Every stored episode as portable newline-delimited JSON. */
+export async function exportEpisodes() {
+  await warmup();
+  const error = warmupError();
+  if (error) throw new Error(error);
+  return getStore().exportEpisodes();
 }
 
 export async function resetMemory(): Promise<void> {

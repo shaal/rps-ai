@@ -250,7 +250,7 @@ app/
   api/round/route.ts    open the commitment against a throw, record the episode
   api/status/route.ts   warmup state, memory size, engine info
   api/reset/route.ts    erase all memory
-  api/export/route.ts   download the .db file
+  api/export/route.ts   download every episode as newline-delimited JSON
 lib/
   rps.ts                pure game logic + the context builder
   predict.ts            pure weighting, confidence, sampling
@@ -275,11 +275,20 @@ rather than inferred from the type definitions:
 
 - **`search()` returns a distance, not a similarity.** A self-match scores
   ~1e-14. Lower is closer. Getting this backwards inverts the whole AI.
-- **The native addon fails open.** If the platform binding does not load,
-  RuVector silently substitutes a no-op stub where `insert()` returns fake ids
-  and `search()` always returns `[]` — the AI would look like it was learning
-  while being permanently blind. `RuVectorStore.init()` refuses to start unless
-  `getImplementationType() === "native"`.
+- **The backend is chosen by priority, and one option fails open.** RuVector
+  tries native Rust, then RVF if `@ruvector/rvf` is installed, then a stub. The
+  stub is the dangerous one: `insert()` returns fake ids and `search()` always
+  returns `[]`, so the AI would look like it was learning while being
+  permanently blind. `init()` rejects the stub and accepts either real backend.
+  An earlier version demanded `native` specifically, which would also have
+  refused RVF and failed to start on any platform without a prebuilt Rust
+  binary (Apple Silicon, Alpine, ARM) where the game runs fine.
+- **The database file size says nothing about how much you have played.** It is
+  a [redb](https://github.com/cberner/redb) arena that pre-allocates: a store
+  with *zero* episodes is already 1,589,248 bytes, and stays exactly that size
+  through 200 episodes before roughly doubling at 500 and again at 1000. An
+  empty file gzips to 2.8KB — 99.8% of it is padding. This is why the export is
+  not the raw file.
 - **There is no `clear()`, `close()` or `flush()`.** Writes persist
   automatically.
 - **Deleting the .db file does not reset a running process.** The engine keeps
@@ -333,5 +342,27 @@ is. Note that this stops being RuVector at that point.
 
 ## Resetting and exporting
 
-**Reset AI memory** erases every episode (two-step confirm). **Export memory**
-downloads the raw `.db`. Both are in the header.
+**Reset AI memory** erases every episode (two-step confirm).
+
+**Export memory** downloads newline-delimited JSON, one episode per line, at
+about 194 bytes each — **52 episodes come to 10KB**. Exporting the raw database
+instead would hand over 1.6MB, roughly 99% of which is pre-allocated padding
+rather than anything you played.
+
+Vectors are deliberately omitted. They are deterministic re-embeddings of
+`context`, so the metadata alone is enough to rebuild the memory — on this
+engine or a different one, which is also what makes the export useful across
+the `MemoryStore` seam.
+
+The export reads `data/episodes.jsonl`, an append-only log written alongside
+the database, because the vector index cannot be reliably enumerated: retrieval
+at `k = len()` returns everything for well-spread vectors but collapses on real
+game data. A store that predates the log gets one best-effort backfill pass on
+startup, and the response reports what happened rather than quietly handing
+over a short file:
+
+```
+X-Episode-Count: 52
+X-Store-Size:    52
+X-Export-Partial: false
+```
