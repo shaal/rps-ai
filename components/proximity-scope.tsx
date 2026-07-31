@@ -52,7 +52,20 @@ export function ProximityScope({
 
   return (
     <div className="relative">
-      <svg viewBox="0 0 200 200" className="w-full" role="img" aria-label="Retrieved memory neighbourhood">
+      <svg
+        viewBox="0 0 200 200"
+        className="w-full"
+        role="img"
+        // The plot is the only place the size and tightness of the recalled
+        // cluster appears; the label has to carry both or it carries nothing.
+        aria-label={
+          neighbors.length === 0
+            ? "Memory neighbourhood: nothing recalled yet."
+            : `Memory neighbourhood: ${neighbors.length} episode${
+                neighbors.length === 1 ? "" : "s"
+              } recalled, at cosine distances from ${dMin.toFixed(3)} to ${dMax.toFixed(3)}.`
+        }
+      >
         <defs>
           <radialGradient id="scope-core">
             <stop offset="0%" stopColor="#2fe0cf" stopOpacity={0.5} />
@@ -139,7 +152,7 @@ export function ProximityScope({
       </svg>
 
       {neighbors.length > 0 && !scanning && (
-        <div className="readout mt-1 flex justify-between text-[10px] text-faint">
+        <div className="readout mt-1 flex justify-between text-[0.6875rem] text-faint">
           <span>nearest {dMin.toFixed(3)}</span>
           <span>furthest {dMax.toFixed(3)}</span>
         </div>

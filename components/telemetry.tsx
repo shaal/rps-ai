@@ -1,5 +1,6 @@
 "use client";
 
+import { Explainer } from "./explainer";
 import { MOVE_HEX, MoveGlyph } from "./move-glyph";
 import type { Outcome, RoundRecord } from "@/lib/types";
 
@@ -8,6 +9,9 @@ const OUTCOME_HEX: Record<Outcome, string> = {
   loss: "#ff4f6d",
   draw: "#7b8ea3",
 };
+
+/** So the result of a round survives being read in greyscale. */
+const OUTCOME_MARK: Record<Outcome, string> = { win: "W", loss: "L", draw: "D" };
 
 export function Telemetry({
   history,
@@ -29,9 +33,36 @@ export function Telemetry({
 
   return (
     <section className="panel p-5" aria-label="Session telemetry">
-      <header className="mb-4 flex items-baseline justify-between">
-        <h2 className="eyebrow">Telemetry</h2>
-        <span className="readout text-[10px] text-faint">
+      <header className="mb-4 flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <h2 className="eyebrow">Telemetry</h2>
+          <Explainer
+            label="How to read these numbers, and what counts as the AI winning"
+            title="Reading these numbers"
+          >
+            <p>
+              <strong>AI read rate</strong> is how often it correctly guessed your next throw.
+              The number to compare it against is <strong>33%</strong>, not 50% — with three
+              moves, blind guessing is right one time in three.
+            </p>
+            <p>
+              So above 33% means it has genuinely found a pattern in how you play. At or below
+              it, you are being unpredictable enough that its memory is not buying it
+              anything. That is the line drawn across the chart.
+            </p>
+            <p>
+              Early rounds are left out of this. The AI throws at random until it has enough
+              memories to search, and counting those as correct guesses would flatter the
+              number.
+            </p>
+            <p>
+              Beating it is easier than it looks: play the move that beats what it expects.
+              Flip the instrument to <strong>Foresight</strong> and it will show you its
+              sealed move before you throw.
+            </p>
+          </Explainer>
+        </div>
+        <span className="readout text-[0.6875rem] text-faint">
           {memorySize} episode{memorySize === 1 ? "" : "s"} stored
         </span>
       </header>
@@ -51,7 +82,7 @@ export function Telemetry({
         <div className="mt-5">
           <div className="mb-1.5 flex items-baseline justify-between">
             <h3 className="eyebrow">Read rate over time</h3>
-            <span className="readout text-[10px] text-faint">33% = chance</span>
+            <span className="readout text-[0.6875rem] text-faint">33% = chance</span>
           </div>
           <AccuracySparkline history={scored} />
         </div>
@@ -60,19 +91,33 @@ export function Telemetry({
       {rounds > 0 && (
         <div className="mt-5">
           <h3 className="eyebrow mb-2">Recent rounds</h3>
+          {/* Outcome used to be a tint and nothing else, with the words parked
+              in a `title` you had to find with a mouse. The W/L/D letter puts
+              it back in the open, and the full sentence is there to be read
+              aloud. */}
           <ol className="flex flex-wrap gap-1.5">
             {history.slice(-14).map((round) => (
               <li
                 key={round.round}
-                title={`Round ${round.round}: you played ${round.humanMove}, AI played ${round.aiMove} — ${round.outcome}`}
-                className="flex h-9 w-9 items-center justify-center rounded-md border"
+                className="flex h-9 w-9 flex-col items-center justify-center gap-0.5 rounded-md border"
                 style={{
-                  borderColor: `${OUTCOME_HEX[round.outcome]}55`,
+                  borderColor: `${OUTCOME_HEX[round.outcome]}88`,
                   background: `${OUTCOME_HEX[round.outcome]}12`,
                   color: MOVE_HEX[round.humanMove],
                 }}
               >
-                <MoveGlyph move={round.humanMove} size={18} />
+                <MoveGlyph move={round.humanMove} size={16} />
+                <span
+                  aria-hidden
+                  className="readout text-[0.625rem] leading-none font-bold"
+                  style={{ color: OUTCOME_HEX[round.outcome] }}
+                >
+                  {OUTCOME_MARK[round.outcome]}
+                </span>
+                <span className="sr-only">
+                  Round {round.round}: you played {round.humanMove}, AI played {round.aiMove} —{" "}
+                  {round.outcome}
+                </span>
               </li>
             ))}
           </ol>
@@ -84,10 +129,15 @@ export function Telemetry({
 
 function Stat({ label, value, hint }: { label: string; value: string; hint?: string }) {
   return (
+    // The hint lives inside the <dd>, not beside it: a <div> inside a <dl> may
+    // only hold <dt>/<dd> pairs, and a stray <p> there breaks the mapping
+    // between every term and its definition.
     <div className="rounded-lg border border-line bg-void/50 px-3 py-2.5">
-      <dt className="eyebrow text-[9px]">{label}</dt>
-      <dd className="readout mt-1 text-xl leading-none text-ink">{value}</dd>
-      {hint && <p className="readout mt-1 text-[10px] text-faint">{hint}</p>}
+      <dt className="eyebrow">{label}</dt>
+      <dd className="mt-1">
+        <span className="readout block text-xl leading-none text-ink">{value}</span>
+        {hint && <span className="readout mt-1 block text-[0.6875rem] text-faint">{hint}</span>}
+      </dd>
     </div>
   );
 }
@@ -117,7 +167,12 @@ function AccuracySparkline({ history }: { history: RoundRecord[] }) {
       className="w-full"
       preserveAspectRatio="none"
       role="img"
-      aria-label="AI read rate over the session"
+      // A shape called "read rate over time" tells you nothing without the
+      // numbers. Chance is the line that makes the figure mean something, so
+      // it goes in the label too.
+      aria-label={`AI read rate across ${history.length} scored rounds, now ${Math.round(
+        (hits / history.length) * 100,
+      )} percent against 33 percent for chance.`}
     >
       <defs>
         <linearGradient id="spark-fill" x1="0" y1="0" x2="0" y2="1">

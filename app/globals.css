@@ -6,12 +6,20 @@
   --color-panel: #0a0f18;
   --color-raised: #0e1523;
   --color-line: #1a2534;
-  --color-line-lit: #27384d;
+  --color-line-lit: #5a6c80;
 
-  /* Text */
+  /* The boundary of anything you can operate. Held at >=3:1 against every
+     surface, because for a control the border is what says "this is a
+     control". Plain dividers and panel edges keep `line`: they are decoration
+     and carry no state, so the quiet value is fine there. */
+  --color-line-control: #5a6c80;
+
+  /* Text. `faint` is the quietest voice we have, but it is still body copy —
+     eyebrows, captions, readouts — so it is pinned at >=4.5:1 against every
+     surface above rather than to whatever looked dim enough. */
   --color-ink: #e6f0f7;
   --color-dim: #8397ab;
-  --color-faint: #4d6076;
+  --color-faint: #7288a0;
 
   /* Move hues. Each move owns one colour everywhere it appears — scope nodes,
      probability bars, glyphs — so the eye learns the mapping in one round. */
@@ -28,6 +36,15 @@
 
   --font-display: var(--font-archivo), system-ui, sans-serif;
   --font-mono: var(--font-jetbrains), ui-monospace, monospace;
+
+  /* Running body copy, nudged up from Tailwind's 14px. Overridden here rather
+     than at ~six call sites so the scale stays in one place.
+
+     Everything on this page is sized in rem for a reason: px would pin the
+     type to 10 and 11 no matter what, so a reader who has raised their
+     browser's default font size — the one setting they changed specifically
+     to make text bigger — would get nothing at all from it. */
+  --text-sm: 0.9375rem;
 }
 
 /* ---------------------------------------------------------------- base --- */
@@ -81,6 +98,30 @@ body::after {
   border-radius: 2px;
 }
 
+/* Six header controls — three modes, keys, export, reset — sit between the top
+   of the document and the throws. This is the way past them. Parked above the
+   container until it takes focus, so it costs the layout nothing. */
+.skip-link {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  z-index: 60;
+  transform: translate(-50%, -150%);
+  padding: 10px 18px;
+  border: 1px solid var(--color-line-control);
+  border-top: 0;
+  border-radius: 0 0 10px 10px;
+  background: var(--color-raised);
+  color: var(--color-ink);
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  transition: transform 160ms ease;
+}
+
+.skip-link:focus {
+  transform: translate(-50%, 0);
+}
+
 /* ------------------------------------------------------------ primitives --- */
 
 .panel {
@@ -93,7 +134,7 @@ body::after {
 /* Instrument label: the small silkscreened caption on lab equipment. */
 .eyebrow {
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: 0.6875rem;
   font-weight: 500;
   letter-spacing: 0.18em;
   text-transform: uppercase;
@@ -121,7 +162,7 @@ body::after {
   gap: 10px;
   padding: 22px 12px 16px;
   border-radius: 16px;
-  border: 1px solid var(--color-line);
+  border: 1px solid var(--color-line-control);
   background: linear-gradient(180deg, rgba(16, 24, 39, 0.9), rgba(9, 14, 23, 0.9));
   color: var(--color-dim);
   cursor: pointer;
@@ -144,33 +185,223 @@ body::after {
   pointer-events: none;
 }
 
-.throw:hover:not(:disabled),
-.throw:focus-visible:not(:disabled) {
+/* Live throws are matched on `aria-disabled` rather than `:disabled`. A real
+   `disabled` button drops out of the tab order, so the round you just played
+   would throw focus back to <body> every single time — see the note in
+   ThrowRow. `aria-disabled` keeps the button focusable and still announces
+   as unavailable. */
+/* Hover is gated on there actually being a pointer that hovers.
+   A touch browser has no way to "leave" an element, so it parks `:hover` on
+   the last thing you tapped and holds it there until you tap something else.
+   Ungated, that turns this into a button that lights up on tap and never goes
+   out — which is why the stuck glow only ever showed on a phone. The one-shot
+   `.is-lit` flare is the touch equivalent, and it ends on its own. */
+@media (hover: hover) {
+  .throw:hover:not([aria-disabled="true"]) {
+    transform: translateY(-3px);
+    border-color: var(--throw-hue);
+    color: var(--color-ink);
+    box-shadow: 0 12px 40px -18px var(--throw-hue);
+  }
+
+  .throw:hover:not([aria-disabled="true"])::after {
+    opacity: 0.22;
+  }
+}
+
+/* Keyboard focus is not a pointer state, so it stays unconditional — this is
+   what gives a keyboard player the same read as a mouse hover. */
+.throw:focus-visible:not([aria-disabled="true"]) {
   transform: translateY(-3px);
   border-color: var(--throw-hue);
   color: var(--color-ink);
   box-shadow: 0 12px 40px -18px var(--throw-hue);
 }
 
-.throw:hover:not(:disabled)::after,
-.throw:focus-visible:not(:disabled)::after {
+.throw:focus-visible:not([aria-disabled="true"])::after {
   opacity: 0.22;
 }
 
-.throw:active:not(:disabled) {
+.throw:active:not([aria-disabled="true"]) {
   transform: translateY(-1px) scale(0.985);
 }
 
-.throw:disabled {
-  opacity: 0.4;
+/* Unavailable, but still readable. Blanket `opacity` was the obvious way to
+   grey this out and it is exactly what breaks it: at any level low enough to
+   read as "off", the label falls under 4.5:1. So the state is carried by the
+   border and the glyph — the glyph is decorative and aria-hidden — while the
+   text keeps full strength. */
+.throw[aria-disabled="true"] {
   cursor: not-allowed;
+  border-color: var(--color-line);
+  background: linear-gradient(180deg, rgba(12, 18, 30, 0.9), rgba(7, 11, 18, 0.9));
+}
+
+.throw[aria-disabled="true"] svg {
+  opacity: 0.45;
 }
 
 .throw-key {
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: 0.6875rem;
   letter-spacing: 0.16em;
   color: var(--color-faint);
+}
+
+/* ------------------------------------------------------------- throw glow --- */
+
+/* The bloom that hover gives a mouse, fired as a one-shot instead.
+   `:hover` never resolves on touch and `:active` only lasts as long as the
+   finger is down, so on a phone the nicest thing the button does was simply
+   unreachable. Same two layers as the hover state — rim and wash — so a tap
+   and a hover look like the same object responding. */
+@keyframes throw-flare {
+  0% {
+    border-color: var(--color-line-control);
+    box-shadow: 0 12px 40px -18px transparent;
+  }
+  38% {
+    border-color: var(--throw-hue);
+    box-shadow: 0 14px 46px -16px var(--throw-hue);
+  }
+  100% {
+    border-color: var(--color-line-control);
+    box-shadow: 0 12px 40px -18px transparent;
+  }
+}
+
+@keyframes throw-flare-wash {
+  0% {
+    opacity: 0;
+  }
+  38% {
+    opacity: var(--flare-peak, 0.28);
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+/* Deliberately not gated on `:not([aria-disabled])` like hover is: the round
+   starts resolving the instant you tap, which switches the button off, and
+   gating it there would cut the acknowledgement off after about one frame. */
+.throw.is-lit {
+  --flare-peak: 0.34;
+  animation: throw-flare 520ms cubic-bezier(0.2, 0.8, 0.3, 1) both;
+}
+
+.throw.is-lit::after {
+  animation: throw-flare-wash 520ms cubic-bezier(0.2, 0.8, 0.3, 1) both;
+}
+
+/* The idle sweep: the same flare walking left to right, staggered by index.
+   Softer and slower than a tap — it is meant to catch the eye at the edge of
+   vision, not to look like the game responding to something. Skipped on a
+   disabled row so it never implies the buttons are live when they are not. */
+.throw-row.is-sweeping .throw:not([aria-disabled="true"]) {
+  --flare-peak: 0.2;
+  animation: throw-flare 760ms ease-in-out var(--sweep-delay, 0ms) both;
+}
+
+.throw-row.is-sweeping .throw:not([aria-disabled="true"])::after {
+  animation: throw-flare-wash 760ms ease-in-out var(--sweep-delay, 0ms) both;
+}
+
+/* ------------------------------------------------------------ explainer --- */
+
+/* 24px is not an aesthetic choice — it is the WCAG 2.2 floor for a target you
+   are expected to hit. */
+.explain-dot {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--color-line-control);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--color-faint);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  line-height: 1;
+  cursor: pointer;
+  transition:
+    color 160ms ease,
+    border-color 160ms ease,
+    background-color 160ms ease;
+}
+
+/* Same touch caveat as the throw buttons: ungated, this would stay lit on a
+   phone after the popup was dismissed. */
+@media (hover: hover) {
+  .explain-dot:hover {
+    color: var(--color-scissors);
+    border-color: var(--color-scissors);
+    background: rgba(47, 224, 207, 0.1);
+  }
+}
+
+.explain-pop {
+  /* `inset: auto` clears the UA's centring so the script can place this on its
+     anchor; without it the popover sits in the middle of the screen. */
+  position: fixed;
+  inset: auto;
+  margin: 0;
+  width: max-content;
+  max-width: min(360px, calc(100vw - 24px));
+  /* A short window — a phone held sideways — would otherwise push the last
+     paragraph off-screen with no way to reach it. */
+  max-height: calc(100dvh - 24px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 16px 18px 18px;
+  border: 1px solid var(--color-line-control);
+  border-radius: 12px;
+  background: var(--color-raised);
+  color: var(--color-dim);
+  box-shadow: 0 26px 70px -24px rgb(0 0 0 / 0.95);
+}
+
+/* Focus lands here on open, and the ring is how that is announced visually.
+   Only the shape is adjusted — the indicator itself stays. */
+.explain-pop:focus-visible {
+  outline-offset: 2px;
+  border-radius: 12px;
+}
+
+.explain-pop::backdrop {
+  background: rgb(0 0 0 / 0.35);
+}
+
+.explain-pop-title {
+  margin-bottom: 10px;
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  font-weight: 500;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--color-scissors);
+}
+
+.explain-pop p:not(.explain-pop-title) {
+  font-size: 0.8125rem;
+  line-height: 1.65;
+}
+
+.explain-pop p:not(.explain-pop-title) + p {
+  margin-top: 10px;
+}
+
+.explain-pop strong {
+  color: var(--color-ink);
+  font-weight: 600;
+}
+
+.explain-pop .readout {
+  font-size: 0.6875rem;
+  color: var(--color-faint);
+  overflow-wrap: anywhere;
 }
 
 /* ----------------------------------------------------------------- bars --- */
@@ -190,8 +421,39 @@ body::after {
 
 /* --------------------------------------------------------------- flip ----- */
 
+/* The panel is 246px wide and 556px tall, and the old `perspective: 1800px` was
+   more than seven times its width — so close to orthographic that the turn read
+   as a horizontal squash rather than anything moving in depth. 900px is the
+   compromise the aspect ratio forces: short enough to foreshorten properly,
+   long enough that the 556px of height does not fan out at the top and bottom
+   edges the way a 350px perspective would.
+
+   The origin sits slightly above centre, where you would be looking. */
 .flip-scene {
-  perspective: 1800px;
+  /* Declared on the scene so they inherit down to the depth wrapper, the
+     rotating inner and the face shading alike — all three have to run on the
+     same clock or the lighting drifts out of step with the angle. */
+  --flip-duration: 680ms;
+  /* Weighted at both ends. The old curve was an ease-out: it left instantly at
+     full speed, which is what a sprite swap does, not what a hinged panel
+     does. */
+  --flip-ease: cubic-bezier(0.45, 0.05, 0.25, 1);
+
+  perspective: 900px;
+  perspective-origin: 50% 42%;
+}
+
+/* Rotation and depth are deliberately on two different elements. The dip
+   toward the viewer is non-monotonic — out and back within one flip — which a
+   transition cannot express, so it is a keyframe animation; the rotation stays
+   a transition so it can be interrupted mid-turn. Sharing one element would
+   put `animation` and `transition` in a fight over `transform`. */
+.flip-depth {
+  transform-style: preserve-3d;
+}
+
+.flip-depth.is-flipping {
+  animation: flip-depth var(--flip-duration) var(--flip-ease);
 }
 
 /* Both faces occupy the same grid cell, so the card is as tall as the taller
@@ -199,7 +461,7 @@ body::after {
 .flip-inner {
   display: grid;
   transform-style: preserve-3d;
-  transition: transform 620ms cubic-bezier(0.2, 0.8, 0.3, 1);
+  transition: transform var(--flip-duration) var(--flip-ease);
 }
 
 .flip-inner.is-flipped {
@@ -208,12 +470,57 @@ body::after {
 
 .flip-face {
   grid-area: 1 / 1;
+  position: relative;
   backface-visibility: hidden;
   -webkit-backface-visibility: hidden;
+  /* A hair of Z separation. Coplanar faces let the hidden one punch through as
+     a flicker on the frame where the depth sort ties. */
+  transform: translateZ(1px);
 }
 
 .flip-face--back {
-  transform: rotateY(180deg);
+  transform: rotateY(180deg) translateZ(1px);
+}
+
+/* Lighting, and the single biggest reason the old flip read as fake: a real
+   panel turning away from the light goes dark, and it is darkest at the moment
+   it is edge-on.
+
+   No keyframes needed. Each face is only visible for its own half of the turn,
+   so a plain transition on each — front darkening 0 -> 1, back lightening
+   1 -> 0, both on the rotation's own easing curve — puts maximum shade exactly
+   at the 90 degree hand-off and hides the face swap inside it. */
+.flip-face::after {
+  content: "";
+  position: absolute;
+  inset: -6px;
+  border-radius: 12px;
+  pointer-events: none;
+  background: linear-gradient(100deg, rgba(2, 4, 8, 0.95), rgba(2, 4, 8, 0.62));
+  opacity: 0;
+  transition: opacity var(--flip-duration) var(--flip-ease);
+}
+
+.flip-face--back::after {
+  opacity: 0.92;
+}
+
+.flip-inner.is-flipped .flip-face:not(.flip-face--back)::after {
+  opacity: 0.92;
+}
+
+.flip-inner.is-flipped .flip-face--back::after {
+  opacity: 0;
+}
+
+@keyframes flip-depth {
+  0%,
+  100% {
+    transform: translateZ(0) scale(1);
+  }
+  45% {
+    transform: translateZ(-30px) scale(0.965);
+  }
 }
 
 /* ------------------------------------------------------------- motion ----- */
@@ -338,18 +645,38 @@ body::after {
     animation-duration: 0.001ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
   }
 
-  .throw:hover:not(:disabled) {
+  .throw:hover:not([aria-disabled="true"]),
+  .throw:focus-visible:not([aria-disabled="true"]),
+  .throw:active:not([aria-disabled="true"]) {
     transform: none;
+  }
+
+  /* The idle sweep is decorative motion nobody asked to start, so it goes
+     entirely — the scheduler is skipped too, not just the animation. */
+  .throw-row.is-sweeping .throw,
+  .throw-row.is-sweeping .throw::after {
+    animation: none !important;
   }
 
   /* No 3D rotation. The faces swap outright, which still reads as a mode
      change without spinning anything. */
   .flip-inner,
   .flip-inner.is-flipped,
+  .flip-depth,
+  .flip-depth.is-flipping,
+  .flip-face,
   .flip-face--back {
     transform: none !important;
+    animation: none !important;
+  }
+
+  /* Shading only makes sense as a lighting cue on something that is turning.
+     With nothing turning it would just be a dark sheet over the live face. */
+  .flip-face::after {
+    display: none;
   }
 
   .flip-face {
