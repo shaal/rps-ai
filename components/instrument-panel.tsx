@@ -1,5 +1,8 @@
 "use client";
 
+import { useState } from "react";
+
+import { Explainer } from "./explainer";
 import { MOVE_HEX, MOVE_LABEL, MoveGlyph } from "./move-glyph";
 import { ProximityScope } from "./proximity-scope";
 import { MOVES } from "@/lib/rps";
@@ -54,12 +57,47 @@ export function InstrumentPanel({
 }) {
   const flipped = view === "foresight";
 
+  /** True only while a turn is in flight, to gate the depth animation. */
+  const [flipping, setFlipping] = useState(false);
+
+  const turnTo = (next: View) => {
+    if (next !== view) setFlipping(true);
+    onView(next);
+  };
+
   return (
     <section className="panel flex flex-col p-5" aria-label="AI instrument">
       <header className="flex flex-col gap-3">
-        <div className="flex items-baseline justify-between gap-3">
-          <h2 className="eyebrow">Instrument</h2>
-          <span className="readout text-[10px] text-faint">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <h2 className="eyebrow">Instrument</h2>
+            <Explainer label="How the AI predicts your next throw" title="How it reads you">
+              <p>
+                After every round the AI writes itself a short note about the situation: what
+                you both just played, who is ahead, how the last few rounds went. That note is
+                then turned into a long list of numbers — think of it as a position on a map,
+                where notes describing similar situations end up near each other.
+              </p>
+              <p>
+                Before your next throw it writes a note about <strong>right now</strong>, finds
+                its nearest notes from the past, and reads what you did next in each of them.
+                The answer that keeps coming up is its prediction, and closer memories count
+                for more than distant ones.
+              </p>
+              <p>
+                That is the whole trick. It is not reasoning about rock, paper and scissors —
+                it is asking <strong>“when things looked like this before, what did this person
+                do?”</strong> Which is why it knows nothing until you have given it a handful
+                of rounds to remember.
+              </p>
+              <p>
+                The dial below is that lookup, drawn. Every dot is one memory, coloured by what
+                you played next. The nearer the centre, the more similar it was — and the
+                bigger the dot, the more it counted toward the guess.
+              </p>
+            </Explainer>
+          </div>
+          <span className="readout text-[0.6875rem] text-faint">
             {flipped
               ? foresight
                 ? `round ${foresight.round} · sealed`
@@ -71,15 +109,15 @@ export function InstrumentPanel({
         </div>
 
         <div
-          className="grid grid-cols-2 gap-1 rounded-lg border border-line p-1"
+          className="grid grid-cols-2 gap-1 rounded-lg border border-line-control p-1"
           role="group"
           aria-label="Which round to inspect"
         >
-          <FaceTab active={!flipped} onClick={() => onView("hindsight")} label="Hindsight" />
-          <FaceTab active={flipped} onClick={() => onView("foresight")} label="Foresight" />
+          <FaceTab active={!flipped} onClick={() => turnTo("hindsight")} label="Hindsight" />
+          <FaceTab active={flipped} onClick={() => turnTo("foresight")} label="Foresight" />
         </div>
 
-        <p className="text-[11px] leading-relaxed text-faint">
+        <p className="text-[0.75rem] leading-relaxed text-faint">
           {flipped
             ? "Showing the move it has already sealed. You can win every round from here."
             : "Showing how it read the round you just played."}
@@ -87,15 +125,25 @@ export function InstrumentPanel({
       </header>
 
       <div className="flip-scene mt-5">
-        <div className={`flip-inner ${flipped ? "is-flipped" : ""}`}>
-          {/* Both faces stay mounted so the flip has something to reveal. The
-              inactive one is inert, so it is not focusable and screen readers
-              do not announce the round you are not looking at. */}
-          <div className="flip-face" data-active={!flipped} inert={flipped}>
-            <HindsightFace reasoning={hindsight} scanning={scanning} />
-          </div>
-          <div className="flip-face flip-face--back" data-active={flipped} inert={!flipped}>
-            <ForesightFace peek={foresight} peeking={peeking} />
+        {/* The depth dip runs here rather than on the rotating element: it is
+            out-and-back within a single flip, so it has to be a keyframe
+            animation, and animation and transition cannot both own `transform`
+            on one element. Driven from the click and cleared on animationend —
+            no effect, no timer. */}
+        <div
+          className={`flip-depth ${flipping ? "is-flipping" : ""}`}
+          onAnimationEnd={() => setFlipping(false)}
+        >
+          <div className={`flip-inner ${flipped ? "is-flipped" : ""}`}>
+            {/* Both faces stay mounted so the flip has something to reveal. The
+                inactive one is inert, so it is not focusable and screen readers
+                do not announce the round you are not looking at. */}
+            <div className="flip-face" data-active={!flipped} inert={flipped}>
+              <HindsightFace reasoning={hindsight} scanning={scanning} />
+            </div>
+            <div className="flip-face flip-face--back" data-active={flipped} inert={!flipped}>
+              <ForesightFace peek={foresight} peeking={peeking} />
+            </div>
           </div>
         </div>
       </div>
@@ -117,7 +165,7 @@ function FaceTab({
       type="button"
       onClick={onClick}
       aria-pressed={active}
-      className={`readout rounded-md px-3 py-1.5 text-[11px] tracking-wide uppercase transition-colors ${
+      className={`readout rounded-md px-3 py-1.5 text-[0.75rem] tracking-wide uppercase transition-colors ${
         active ? "bg-scissors/15 text-scissors" : "text-faint hover:text-dim"
       }`}
     >
@@ -203,7 +251,7 @@ function ForesightFace({ peek, peeking }: { peek: PeekResponse | null; peeking: 
       {reasoning.mode === "bootstrap" ? (
         <>
           <div className="hairline" />
-          <p className="text-[11px] leading-relaxed text-warn">
+          <p className="text-[0.75rem] leading-relaxed text-warn">
             Still bootstrapping — this throw is random and carries no read.
           </p>
         </>
@@ -264,12 +312,12 @@ function SealedMove({
             {MOVE_LABEL[move]}
           </p>
           <p
-            className="readout mt-2 text-[10px] tracking-wide uppercase"
+            className="readout mt-2 text-[0.6875rem] tracking-wide uppercase"
             style={{ color: intent.hex }}
           >
             {intent.label}
           </p>
-          <p className="mt-1 text-[11px] leading-relaxed text-dim">{intent.line}</p>
+          <p className="mt-1 text-[0.75rem] leading-relaxed text-dim">{intent.line}</p>
         </div>
       </div>
 
@@ -277,11 +325,11 @@ function SealedMove({
           Scissors, say "playing to win", and then seal Scissors — which only
           makes sense once you know it sampled an underdog to play against. */}
       {explored ? (
-        <p className="text-[11px] leading-relaxed text-warn">
+        <p className="text-[0.75rem] leading-relaxed text-warn">
           It is ignoring its read this round and throwing at random.
         </p>
       ) : playedAgainst && predictedHuman && playedAgainst !== predictedHuman ? (
-        <p className="text-[11px] leading-relaxed text-faint">
+        <p className="text-[0.75rem] leading-relaxed text-faint">
           It sampled{" "}
           <strong style={{ color: MOVE_HEX[playedAgainst] }}>
             {MOVE_LABEL[playedAgainst]}
@@ -295,7 +343,7 @@ function SealedMove({
       ) : null}
 
       {control?.note && (
-        <p className="text-[11px] leading-relaxed text-faint">{control.note}</p>
+        <p className="text-[0.75rem] leading-relaxed text-faint">{control.note}</p>
       )}
     </div>
   );
@@ -316,11 +364,11 @@ function ReadBlock({
     <div>
       <div className="mb-1 flex items-baseline justify-between gap-3">
         <h3 className="eyebrow">{title}</h3>
-        <span className="readout text-[10px] text-faint">
+        <span className="readout text-[0.6875rem] text-faint">
           confidence {Math.round(reasoning.confidence * 100)}%
         </span>
       </div>
-      <p className="mb-3 text-[11px] leading-relaxed text-faint">{caption}</p>
+      <p className="mb-3 text-[0.75rem] leading-relaxed text-faint">{caption}</p>
 
       <div className="flex flex-col gap-2">
         {MOVES.map((move) => (
@@ -343,7 +391,7 @@ function ReadBlock({
       </dl>
 
       {reasoning.explored && (
-        <p className="mt-3 text-[11px] leading-relaxed text-warn">
+        <p className="mt-3 text-[0.75rem] leading-relaxed text-warn">
           Ignoring its read this round and throwing at random.
         </p>
       )}
@@ -364,7 +412,7 @@ function DistributionRow({
   return (
     <div className="flex items-center gap-3">
       <span
-        className="readout w-16 shrink-0 text-[11px]"
+        className="readout w-16 shrink-0 text-[0.75rem]"
         style={{ color: leading ? MOVE_HEX[move] : undefined }}
       >
         {MOVE_LABEL[move]}
@@ -379,7 +427,7 @@ function DistributionRow({
           }}
         />
       </div>
-      <span className="readout w-9 shrink-0 text-right text-[11px] text-dim">{percent}%</span>
+      <span className="readout w-9 shrink-0 text-right text-[0.75rem] text-dim">{percent}%</span>
     </div>
   );
 }
@@ -391,12 +439,12 @@ function NeighborList({ neighbors }: { neighbors: Reasoning["topNeighbors"] }) {
       <ul className="flex flex-col gap-2">
         {neighbors.map((neighbor) => (
           <li key={neighbor.id} className="rounded-lg border border-line bg-void/40 p-2.5">
-            <div className="readout flex items-center justify-between text-[10px] text-faint">
+            <div className="readout flex items-center justify-between text-[0.6875rem] text-faint">
               <span>episode {neighbor.meta.seq + 1}</span>
               <span>d {neighbor.distance.toFixed(3)}</span>
             </div>
             <div className="mt-1.5 flex items-center justify-between gap-3">
-              <span className="text-[11px] text-dim">
+              <span className="text-[0.75rem] text-dim">
                 you then played{" "}
                 <span
                   className="font-semibold"
@@ -405,7 +453,7 @@ function NeighborList({ neighbors }: { neighbors: Reasoning["topNeighbors"] }) {
                   {MOVE_LABEL[neighbor.meta.nextHumanMove]}
                 </span>
               </span>
-              <span className="readout text-[10px] text-faint">
+              <span className="readout text-[0.6875rem] text-faint">
                 {Math.round(neighbor.influence * 100)}% weight
               </span>
             </div>
@@ -427,20 +475,20 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 
 function CodeBlock({ children }: { children: React.ReactNode }) {
   return (
-    <p className="readout rounded-lg border border-line bg-void/60 p-3 text-[11px] leading-relaxed break-words text-dim">
+    <p className="readout rounded-lg border border-line bg-void/60 p-3 text-[0.75rem] leading-relaxed break-words text-dim">
       {children}
     </p>
   );
 }
 
 function Caption({ children }: { children: React.ReactNode }) {
-  return <p className="mt-2 text-[11px] leading-relaxed text-faint">{children}</p>;
+  return <p className="mt-2 text-[0.75rem] leading-relaxed text-faint">{children}</p>;
 }
 
 function Metric({ label, value }: { label: string; value: string }) {
   return (
     <div className="rounded-lg border border-line bg-void/50 py-2">
-      <dt className="eyebrow text-[9px]">{label}</dt>
+      <dt className="eyebrow">{label}</dt>
       <dd className="readout mt-0.5 text-sm text-ink">{value}</dd>
     </div>
   );

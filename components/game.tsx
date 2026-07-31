@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 
+import { Explainer } from "./explainer";
 import { InstrumentPanel, type View } from "./instrument-panel";
 import { MOVE_HEX, MOVE_LABEL, MoveGlyph } from "./move-glyph";
 import { Telemetry } from "./telemetry";
@@ -28,11 +29,47 @@ const REVEAL_BEAT_MS = 220;
 
 const KEY_TO_MOVE: Record<string, Move> = { r: "rock", p: "paper", s: "scissors" };
 
+const SHORTCUTS_KEY = "rps-shortcuts";
+
+/** How long the throw row waits before introducing itself, once it is usable. */
+const INTRO_SWEEP_MS = 3000;
+
+/**
+ * The shortcut preference kept outside React, so it can be read during render
+ * rather than patched in by an effect after the first paint.
+ *
+ * `useSyncExternalStore` is built for exactly this: it renders the server
+ * snapshot (on), then reconciles against the real stored value once hydrated,
+ * without the mismatch a bare localStorage read during render would cause.
+ */
+const shortcutStore = {
+  listeners: new Set<() => void>(),
+  subscribe(listener: () => void) {
+    shortcutStore.listeners.add(listener);
+    return () => {
+      shortcutStore.listeners.delete(listener);
+    };
+  },
+  /** Anything but an explicit "off" means on, so a fresh browser gets keys. */
+  get: () => window.localStorage.getItem(SHORTCUTS_KEY) !== "off",
+  set(on: boolean) {
+    window.localStorage.setItem(SHORTCUTS_KEY, on ? "on" : "off");
+    for (const listener of shortcutStore.listeners) listener();
+  },
+};
+
 const MODES: Mode[] = ["dominate", "level", "yield"];
 
+/**
+ * One colour per side of the table, used by the scoreline and by the ring
+ * around whichever hand took the round. Tied to the side rather than to the
+ * outcome, so green always means you and red always means the machine.
+ */
+const SIDE_HEX = { you: "#3ddc97", ai: "#ff4f6d" } as const;
+
 const VERDICT: Record<Outcome, { label: string; hex: string }> = {
-  win: { label: "You win", hex: "#3ddc97" },
-  loss: { label: "AI wins", hex: "#ff4f6d" },
+  win: { label: "You win", hex: SIDE_HEX.you },
+  loss: { label: "AI wins", hex: SIDE_HEX.ai },
   draw: { label: "Draw", hex: "#7b8ea3" },
 };
 
@@ -52,6 +89,13 @@ export function Game() {
   const [notice, setNotice] = useState<string | null>(null);
   const [confirmingReset, setConfirmingReset] = useState(false);
   const [resetting, setResetting] = useState(false);
+  /**
+   * R/P/S are single-character shortcuts with no modifier, so WCAG 2.1.4 wants
+   * them switchable off — otherwise anyone driving the page by voice control
+   * fires a throw every time they say a word starting with those letters.
+   * Defaults on, and the choice sticks.
+   */
+  const shortcuts = useSyncExternalStore(shortcutStore.subscribe, shortcutStore.get, () => true);
   /** Bumped to force a new commitment when history alone has not changed. */
   const [commitNonce, setCommitNonce] = useState(0);
 
@@ -288,7 +332,13 @@ export function Game() {
     [ready, resetting, commit, getSessionId],
   );
 
+  const toggleShortcuts = useCallback(() => {
+    shortcutStore.set(!shortcutStore.get());
+  }, []);
+
   useEffect(() => {
+    if (!shortcuts) return;
+
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.metaKey || event.ctrlKey || event.altKey) return;
       const target = event.target as HTMLElement | null;
@@ -302,7 +352,7 @@ export function Game() {
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [play]);
+  }, [play, shortcuts]);
 
   const resetMemory = useCallback(async () => {
     setResetting(true);
@@ -338,21 +388,38 @@ export function Game() {
   const adaptive = (last?.reasoning.mode ?? "bootstrap") === "adaptive";
   const roundsToAdaptive = Math.max(0, BOOTSTRAP_ROUNDS - history.length);
 
+  /**
+   * One sentence per round, for anyone who is not watching the cards.
+   *
+   * The stage used to be the live region itself, which failed twice over: it
+   * is keyed on the round number, so it was torn down and rebuilt at the exact
+   * moment its contents changed — and a live region inserted alongside its own
+   * update is usually not announced at all — and being the whole panel, it
+   * re-read the score, both hands and the commitment hash every time. A small
+   * stable region that never unmounts says the result once, in order.
+   */
+  const announcement = useMemo(() => {
+    if (status?.warming) return "Loading the memory model.";
+    if (!ready) return "Waiting for the memory engine.";
+    if (!last) return "Ready. Throw to begin.";
+    return (
+      `Round ${last.round}. You played ${MOVE_LABEL[last.humanMove]}, ` +
+      `the AI played ${MOVE_LABEL[last.aiMove]}. ${VERDICT[last.outcome].label}. ` +
+      `Score: you ${score.you}, AI ${score.ai}.`
+    );
+  }, [status?.warming, ready, last, score]);
+
   return (
-    <div className="relative z-10 mx-auto flex min-h-dvh w-full max-w-6xl flex-col gap-5 px-4 py-6 sm:px-6 lg:py-10">
-      <Header
-        status={status}
-        adaptive={adaptive}
-        roundsToAdaptive={roundsToAdaptive}
-        mode={mode}
-        onMode={setMode}
-        confirmingReset={confirmingReset}
-        onRequestReset={() => setConfirmingReset(true)}
-        onCancelReset={() => setConfirmingReset(false)}
-        onConfirmReset={resetMemory}
-        resetting={resetting}
-        busy={resolving}
-      />
+    <div className="relative z-10 mx-auto flex min-h-dvh w-full max-w-6xl flex-col gap-4 px-4 py-4 sm:gap-5 sm:px-6 sm:py-6 lg:py-10">
+      <a href="#game" className="skip-link">
+        Skip to the game
+      </a>
+
+      <Header />
+
+      <p className="sr-only" role="status">
+        {announcement}
+      </p>
 
       {error && (
         <p role="alert" className="panel border-loss/40 bg-loss/5 px-4 py-3 text-sm text-loss">
@@ -365,8 +432,14 @@ export function Game() {
         </p>
       )}
 
-      <main className="grid flex-1 gap-5 lg:grid-cols-[minmax(0,1fr)_370px]">
-        <div className="flex flex-col gap-5">
+      {/* tabIndex -1 so the skip link can land here. Programmatic focus does
+          not satisfy :focus-visible, so this never draws a stray ring. */}
+      <main
+        id="game"
+        tabIndex={-1}
+        className="grid flex-1 gap-4 sm:gap-5 lg:grid-cols-[minmax(0,1fr)_370px]"
+      >
+        <div className="flex flex-col gap-4 sm:gap-5">
           <Stage
             last={last}
             resolving={resolving}
@@ -381,6 +454,28 @@ export function Game() {
           <ThrowRow
             onPlay={play}
             disabled={!ready || resolving || resetting || !commit}
+            shortcuts={shortcuts}
+          />
+
+          {/* Below the throws on purpose. These are once-a-session controls,
+              and on a small phone every row above the buttons is a row of the
+              actual game pushed off the bottom of the screen. Moved in the
+              DOM rather than reordered in CSS, so the keyboard walks them in
+              the order they appear. */}
+          <Controls
+            status={status}
+            adaptive={adaptive}
+            roundsToAdaptive={roundsToAdaptive}
+            mode={mode}
+            onMode={setMode}
+            confirmingReset={confirmingReset}
+            onRequestReset={() => setConfirmingReset(true)}
+            onCancelReset={() => setConfirmingReset(false)}
+            onConfirmReset={resetMemory}
+            resetting={resetting}
+            busy={resolving}
+            shortcuts={shortcuts}
+            onToggleShortcuts={toggleShortcuts}
           />
 
           <Telemetry history={history} memorySize={status?.memorySize ?? 0} />
@@ -421,7 +516,25 @@ async function verifyCommitment(result: RoundResponse): Promise<Verification> {
 
 /* ------------------------------------------------------------------ header */
 
-function Header({
+/**
+ * Nothing but the title now.
+ *
+ * The blurb, the status badge and every control used to live here, which cost
+ * 234px above the fold — on a 667px-tall phone that is the difference between
+ * seeing the buttons you throw with and not. They moved below the throws; what
+ * is left is the one line that says what you are looking at.
+ */
+function Header() {
+  return (
+    <header className="animate-rise">
+      <h1 className="text-2xl leading-none font-extrabold tracking-[-0.02em] uppercase sm:text-3xl">
+        Adaptive <span className="text-scissors">RPS</span>
+      </h1>
+    </header>
+  );
+}
+
+function Controls({
   status,
   adaptive,
   roundsToAdaptive,
@@ -433,6 +546,8 @@ function Header({
   onConfirmReset,
   resetting,
   busy,
+  shortcuts,
+  onToggleShortcuts,
 }: {
   status: StatusResponse | null;
   adaptive: boolean;
@@ -445,24 +560,41 @@ function Header({
   onConfirmReset: () => void;
   resetting: boolean;
   busy: boolean;
+  shortcuts: boolean;
+  onToggleShortcuts: () => void;
 }) {
+  /**
+   * Reset swaps one button for two and back again, which leaves focus on a
+   * node that no longer exists — the keyboard lands back at the top of the
+   * document. Follow the control instead: into the confirmation, then back out
+   * to where the trip started.
+   */
+  const resetRef = useRef<HTMLButtonElement>(null);
+  const confirmRef = useRef<HTMLButtonElement>(null);
+  const wasConfirming = useRef(false);
+
+  useEffect(() => {
+    if (confirmingReset) confirmRef.current?.focus();
+    else if (wasConfirming.current) resetRef.current?.focus();
+    wasConfirming.current = confirmingReset;
+  }, [confirmingReset]);
+
   return (
-    <header className="animate-rise flex flex-col gap-4">
+    <section className="flex flex-col gap-4" aria-label="Game settings">
       <div className="flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl leading-none font-extrabold tracking-[-0.02em] uppercase sm:text-3xl">
-            Adaptive <span className="text-scissors">RPS</span>
-          </h1>
-          <p className="mt-1.5 text-sm text-dim">
-            It locks in its move before you throw, then stores the round. The longer
-            you play, the better it reads you.
-          </p>
-        </div>
+        <p className="max-w-prose text-sm text-dim">
+          It locks in its move before you throw, then stores the round. The longer
+          you play, the better it reads you.
+        </p>
         <ModeBadge status={status} adaptive={adaptive} roundsToAdaptive={roundsToAdaptive} />
       </div>
 
       <div className="flex flex-wrap items-center gap-2">
-        <div className="flex rounded-lg border border-line p-1" role="group" aria-label="What the AI plays for">
+        <div
+          className="flex rounded-lg border border-line-control p-1"
+          role="group"
+          aria-label="What the AI plays for"
+        >
           {MODES.map((level) => {
             const active = mode === level;
             return (
@@ -472,7 +604,7 @@ function Header({
                 onClick={() => onMode(level)}
                 title={MODE_PROFILES[level].blurb}
                 aria-pressed={active}
-                className={`readout rounded-md px-3 py-1.5 text-[11px] tracking-wide uppercase transition-colors ${
+                className={`readout rounded-md px-3 py-1.5 text-[0.75rem] tracking-wide uppercase transition-colors ${
                   active ? "bg-scissors/15 text-scissors" : "text-faint hover:text-dim"
                 }`}
               >
@@ -482,53 +614,68 @@ function Header({
           })}
         </div>
 
-        <p className="hidden text-[11px] text-faint sm:block">{MODE_PROFILES[mode].blurb}</p>
+        <p className="hidden text-[0.75rem] text-faint sm:block">{MODE_PROFILES[mode].blurb}</p>
 
         <div className="flex-1" />
+
+        <button
+          type="button"
+          onClick={onToggleShortcuts}
+          aria-pressed={shortcuts}
+          className="readout rounded-lg border border-line-control px-3 py-2 text-[0.75rem] tracking-wide text-faint uppercase transition-colors hover:border-line-lit hover:text-dim"
+        >
+          Keys {shortcuts ? "on" : "off"}
+          {/* `aria-pressed` already carries the state, so this only has to say
+              what the shortcuts are — otherwise it reads "keys off, R P and S
+              throw", which is the opposite of the truth. */}
+          <span className="sr-only"> — single-key throw shortcuts R, P and S</span>
+        </button>
 
         <a
           href="/api/export"
           download
           title="Download every episode as newline-delimited JSON — about 200 bytes each"
-          className="readout rounded-lg border border-line px-3 py-2 text-[11px] tracking-wide text-faint uppercase transition-colors hover:border-line-lit hover:text-dim"
+          className="readout rounded-lg border border-line-control px-3 py-2 text-[0.75rem] tracking-wide text-faint uppercase transition-colors hover:border-line-lit hover:text-dim"
         >
           Export memory
         </a>
 
         {confirmingReset ? (
           <div className="flex items-center gap-2">
-            <span className="readout text-[11px] text-warn">
+            <span className="readout text-[0.75rem] text-warn">
               Erase {status?.memorySize ?? 0} episodes?
             </span>
             <button
+              ref={confirmRef}
               type="button"
-              onClick={onConfirmReset}
-              disabled={resetting}
-              className="readout rounded-lg border border-loss/50 bg-loss/10 px-3 py-2 text-[11px] tracking-wide text-loss uppercase transition-colors hover:bg-loss/20 disabled:opacity-50"
+              onClick={resetting ? undefined : onConfirmReset}
+              aria-disabled={resetting}
+              className="readout rounded-lg border border-loss/50 bg-loss/10 px-3 py-2 text-[0.75rem] tracking-wide text-loss uppercase transition-colors hover:bg-loss/20"
             >
               {resetting ? "Erasing…" : "Erase"}
             </button>
             <button
               type="button"
-              onClick={onCancelReset}
-              disabled={resetting}
-              className="readout rounded-lg border border-line px-3 py-2 text-[11px] tracking-wide text-faint uppercase transition-colors hover:text-dim"
+              onClick={resetting ? undefined : onCancelReset}
+              aria-disabled={resetting}
+              className="readout rounded-lg border border-line-control px-3 py-2 text-[0.75rem] tracking-wide text-faint uppercase transition-colors hover:text-dim"
             >
               Keep
             </button>
           </div>
         ) : (
           <button
+            ref={resetRef}
             type="button"
-            onClick={onRequestReset}
-            disabled={busy || resetting}
-            className="readout rounded-lg border border-line px-3 py-2 text-[11px] tracking-wide text-faint uppercase transition-colors hover:border-loss/50 hover:text-loss disabled:opacity-40"
+            onClick={busy || resetting ? undefined : onRequestReset}
+            aria-disabled={busy || resetting}
+            className="readout rounded-lg border border-line-control px-3 py-2 text-[0.75rem] tracking-wide text-faint uppercase transition-colors hover:border-loss/50 hover:text-loss aria-disabled:cursor-not-allowed"
           >
             Reset AI memory
           </button>
         )}
       </div>
-    </header>
+    </section>
   );
 }
 
@@ -598,7 +745,7 @@ function Badge({
         className={`h-2 w-2 shrink-0 rounded-full ${pulsing ? "animate-blink" : ""}`}
         style={{ background: hex, boxShadow: `0 0 10px ${hex}` }}
       />
-      <div className="readout flex flex-col text-[10px] leading-tight tracking-wide uppercase">
+      <div className="readout flex flex-col text-[0.6875rem] leading-tight tracking-wide uppercase">
         {children}
       </div>
     </div>
@@ -627,30 +774,47 @@ function Stage({
   verification: Verification;
 }) {
   const verdict = last ? VERDICT[last.outcome] : null;
+  /** The outcome of a round that is actually over, or null mid-reveal. */
+  const settled = last && !resolving ? last.outcome : null;
 
   return (
     <section
       key={last?.round ?? "empty"}
-      className={`panel overflow-hidden p-6 sm:p-8 ${
+      className={`panel overflow-hidden p-5 sm:p-8 ${
         last?.outcome === "loss" && !resolving ? "animate-shake" : ""
       }`}
-      aria-live="polite"
     >
       <div className="flex items-center justify-center gap-6 sm:gap-10">
-        <ScoreColumn label="You" value={score.you} hex="#3ddc97" />
+        <ScoreColumn label="You" value={score.you} hex={SIDE_HEX.you} />
         <span className="readout text-xs text-faint">vs</span>
-        <ScoreColumn label="AI" value={score.ai} hex="#ff4f6d" align="right" />
+        <ScoreColumn label="AI" value={score.ai} hex={SIDE_HEX.ai} align="right" />
       </div>
 
-      <div className="mt-7 grid grid-cols-[1fr_auto_1fr] items-center gap-3 sm:gap-6">
-        <HandCard move={last?.humanMove ?? null} caption="Your throw" />
-        <div
-          className="readout text-center text-[11px] tracking-[0.2em] uppercase"
-          style={{ color: verdict?.hex ?? "#4d6076" }}
+      {/* The verdict calls the round before you look down at the hands, and
+          moving it out of the middle gives both cards the width to be read at
+          a glance. `settled` gates the ring on a finished round: during the
+          reveal beat `last` still holds the previous round, and a ring drawn
+          from it would crown the wrong hand for a moment. */}
+      <div className="mt-6 flex flex-col items-center gap-4 sm:mt-7 sm:gap-5">
+        <p
+          className="readout text-center text-[0.75rem] tracking-[0.2em] uppercase"
+          style={{ color: verdict?.hex ?? "var(--color-faint)" }}
         >
           {resolving ? "…" : verdict ? verdict.label : "—"}
+        </p>
+
+        <div className="grid w-full grid-cols-2 items-start gap-4 sm:gap-8">
+          <HandCard
+            move={last?.humanMove ?? null}
+            caption="Your throw"
+            wonHex={settled === "win" ? SIDE_HEX.you : null}
+          />
+          <HandCard
+            move={resolving ? null : (last?.aiMove ?? null)}
+            caption="AI throw"
+            wonHex={settled === "loss" ? SIDE_HEX.ai : null}
+          />
         </div>
-        <HandCard move={resolving ? null : (last?.aiMove ?? null)} caption="AI throw" />
       </div>
 
       <p className="mt-6 text-center text-sm text-dim">
@@ -663,16 +827,29 @@ function Stage({
               : "Throw to begin. The AI plays blind until it has something to remember."}
       </p>
 
-      <CommitmentStrip commit={commit} committing={committing} last={last} verification={verification} />
+      <div className="mt-6 flex items-center justify-center gap-2 border-t border-line pt-4">
+        <span className="eyebrow">Sealed before you threw</span>
+        <SealExplainer
+          commit={commit}
+          committing={committing}
+          last={last}
+          verification={verification}
+        />
+      </div>
     </section>
   );
 }
 
 /**
- * The commitment status line: the hash the AI published before the throw, and
- * whether the revealed move actually matched it.
+ * The commitment mechanism, explained — with its live state folded in.
+ *
+ * The fingerprint and the pass/fail mark used to sit on the stage as a line of
+ * hex nobody could act on. They are still computed and still checked; they
+ * just live behind the question mark now, next to the explanation of what they
+ * are for. Dropping them outright was the other option, but then the claim
+ * that your browser verifies the move would have nothing standing behind it.
  */
-function CommitmentStrip({
+function SealExplainer({
   commit,
   committing,
   last,
@@ -686,35 +863,49 @@ function CommitmentStrip({
   const pendingHash = commit?.hash;
 
   return (
-    <div className="mt-6 flex flex-wrap items-center justify-center gap-x-4 gap-y-1.5 border-t border-line pt-4">
-      {committing || !pendingHash ? (
-        <span className="readout text-[10px] text-faint">Locking in the next move…</span>
-      ) : (
-        <span className="readout text-[10px] text-faint">
-          next move locked · sha256 {pendingHash.slice(0, 8)}…{pendingHash.slice(-4)}
-        </span>
-      )}
+    <Explainer label="How the AI is stopped from changing its move" title="Why it can't cheat">
+      <p>
+        The AI picks its move <strong>before</strong> you throw, then publishes a fingerprint
+        of that choice — the string of letters and numbers below. Think of it as sealing an
+        answer in an envelope and letting you photograph the envelope.
+      </p>
+      <p>
+        When the round resolves it opens the envelope. Your browser takes the revealed move,
+        works out the fingerprint again from scratch, and compares. Change the move by a
+        single letter and the fingerprint comes out completely different — so it cannot
+        quietly swap its throw once it has seen yours.
+      </p>
+      <p>
+        What this does <strong>not</strong> prove is that the sealed choice was a fair one. It
+        only proves the choice did not change.
+      </p>
+
+      <p className="readout mt-3 border-t border-line pt-3">
+        {committing || !pendingHash
+          ? "Sealing the next move…"
+          : `Next move · sha256 ${pendingHash.slice(0, 12)}…${pendingHash.slice(-6)}`}
+      </p>
 
       {last && verification !== "idle" && (
-        <span
-          className="readout text-[10px]"
+        <p
+          className="readout"
           style={{
             color:
               verification === "ok"
-                ? "#3ddc97"
+                ? SIDE_HEX.you
                 : verification === "failed"
-                  ? "#ff4f6d"
-                  : "#4d6076",
+                  ? SIDE_HEX.ai
+                  : "var(--color-faint)",
           }}
         >
           {verification === "ok"
-            ? "✓ last move matched its hash"
+            ? "✓ Last round: the revealed move matched its fingerprint."
             : verification === "failed"
-              ? "✗ hash mismatch — the move changed"
-              : "· hash check unavailable"}
-        </span>
+              ? "✗ Last round: mismatch — the move changed."
+              : "· This browser cannot run the check."}
+        </p>
       )}
-    </div>
+    </Explainer>
   );
 }
 
@@ -782,24 +973,46 @@ function ScoreColumn({
   );
 }
 
-function HandCard({ move, caption }: { move: Move | null; caption: string }) {
+function HandCard({
+  move,
+  caption,
+  wonHex,
+}: {
+  move: Move | null;
+  caption: string;
+  /** This side's colour when it took the round, otherwise null. */
+  wonHex?: string | null;
+}) {
   return (
     <div className="flex flex-col items-center gap-2.5">
       <div
-        className="flex aspect-square w-full max-w-[132px] items-center justify-center rounded-2xl border transition-colors"
+        className="flex aspect-square w-full max-w-[176px] items-center justify-center rounded-2xl border transition-colors"
         style={{
-          borderColor: move ? `${MOVE_HEX[move]}55` : "#1a2534",
+          borderColor: move ? `${MOVE_HEX[move]}55` : "var(--color-line)",
           background: move ? `${MOVE_HEX[move]}0f` : "rgba(5,7,12,0.5)",
           color: move ? MOVE_HEX[move] : "#2b3a4d",
+          // `outline` rather than a wider border: it is drawn outside the box,
+          // so the winning card does not shrink its own contents or shift the
+          // pair out of alignment.
+          ...(wonHex
+            ? { outline: `4px solid ${wonHex}`, outlineOffset: "4px" }
+            : null),
         }}
       >
         {move ? (
           <span className="animate-pop">
-            <MoveGlyph move={move} size={56} />
+            <MoveGlyph move={move} size={76} />
           </span>
         ) : (
-          <span className="readout text-2xl text-faint">?</span>
+          <span className="readout text-3xl text-faint" aria-hidden>
+            ?
+          </span>
         )}
+        {/* The glyph is decorative — the mark alone carries the move for the
+            eye, but there is nothing here to read otherwise. The ring is pure
+            reinforcement of the verdict sitting directly above, so it needs no
+            text of its own. */}
+        <span className="sr-only">{move ? MOVE_LABEL[move] : "Nothing thrown yet"}</span>
       </div>
       <p className="eyebrow">{caption}</p>
     </div>
@@ -808,23 +1021,134 @@ function HandCard({ move, caption }: { move: Move | null; caption: string }) {
 
 /* -------------------------------------------------------------- throw row */
 
-function ThrowRow({ onPlay, disabled }: { onPlay: (move: Move) => void; disabled: boolean }) {
+/**
+ * `aria-disabled` rather than `disabled`, deliberately.
+ *
+ * These buttons switch off for the beat it takes to resolve a round, and a
+ * genuinely disabled button leaves the tab order — so the button you just
+ * pressed vanished from under the keyboard and focus fell back to <body>.
+ * Every round meant tabbing in from the top of the page again. Marked this
+ * way the button stays put and stays focusable, still announces as
+ * unavailable, and the guard below is what actually blocks the throw.
+ */
+function ThrowRow({
+  onPlay,
+  disabled,
+  shortcuts,
+}: {
+  onPlay: (move: Move) => void;
+  disabled: boolean;
+  shortcuts: boolean;
+}) {
+  /** The move whose one-shot glow is currently playing, if any. */
+  const [lit, setLit] = useState<Move | null>(null);
+  const [sweeping, setSweeping] = useState(false);
+  const introShown = useRef(false);
+
+  /**
+   * One pass across the row shortly after arriving, so the buttons introduce
+   * themselves instead of waiting to be discovered.
+   *
+   * Timed from the moment they become usable rather than from page load. The
+   * sweep skips disabled buttons by design, and on a first ever run the engine
+   * is still fetching its model well past the three second mark — counting
+   * from load would spend the introduction on a row that cannot light up.
+   *
+   * The guard is set when the timer fires, not when it is scheduled: React
+   * mounts effects twice in development, and claiming the slot up front would
+   * mean the second mount skips it and the intro never appears.
+   */
+  useEffect(() => {
+    if (introShown.current || disabled) return;
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+
+    const timer = setTimeout(() => {
+      introShown.current = true;
+      setSweeping(true);
+    }, INTRO_SWEEP_MS);
+
+    return () => clearTimeout(timer);
+  }, [disabled]);
+
+  /**
+   * The idle sweep, scheduled one hop at a time rather than on an interval so
+   * the gap between runs can be re-rolled each time \u2014 a fixed cadence starts
+   * reading as a metronome after the second or third pass.
+   *
+   * Nothing is scheduled at all when the reader has asked for less motion;
+   * suppressing it in CSS alone would leave a pointless timer running and
+   * re-rendering forever.
+   */
+  useEffect(() => {
+    const calm = window.matchMedia("(prefers-reduced-motion: reduce)");
+    let timer: ReturnType<typeof setTimeout>;
+
+    const schedule = () => {
+      timer = setTimeout(
+        () => {
+          setSweeping(true);
+          schedule();
+        },
+        // 7-14s. Long enough to stay ambient rather than chatty.
+        7000 + Math.random() * 7000,
+      );
+    };
+
+    const sync = () => {
+      clearTimeout(timer);
+      if (!calm.matches) schedule();
+    };
+
+    sync();
+    calm.addEventListener("change", sync);
+    return () => {
+      clearTimeout(timer);
+      calm.removeEventListener("change", sync);
+    };
+  }, []);
+
   return (
-    <div className="grid grid-cols-3 gap-3">
-      {MOVES.map((move) => (
+    <div
+      className={`throw-row grid grid-cols-3 gap-3 ${sweeping ? "is-sweeping" : ""}`}
+      // Animation events bubble, so one handler serves the whole row. The
+      // sweep is only over once its last, most-delayed button has finished.
+      onAnimationEnd={(event) => {
+        const el = event.target as HTMLElement;
+        if (el.dataset.sweepLast === "true") setSweeping(false);
+        if (el.dataset.move === lit) setLit(null);
+      }}
+    >
+      {MOVES.map((move, index) => (
         <button
           key={move}
           type="button"
-          onClick={() => onPlay(move)}
-          disabled={disabled}
-          className="throw"
-          style={{ "--throw-hue": MOVE_HEX[move] } as React.CSSProperties}
+          data-move={move}
+          data-sweep-last={index === MOVES.length - 1}
+          onClick={
+            disabled
+              ? undefined
+              : () => {
+                  setLit(move);
+                  onPlay(move);
+                }
+          }
+          aria-disabled={disabled}
+          className={`throw ${lit === move ? "is-lit" : ""}`}
+          style={
+            {
+              "--throw-hue": MOVE_HEX[move],
+              "--sweep-delay": `${index * 150}ms`,
+            } as React.CSSProperties
+          }
         >
           <MoveGlyph move={move} size={40} />
           <span className="text-sm font-semibold tracking-wide uppercase">
             {MOVE_LABEL[move]}
           </span>
-          <span className="throw-key">press {move[0].toUpperCase()}</span>
+          {/* Held open when shortcuts are off so the row does not resize. */}
+          <span className="throw-key" aria-hidden>
+            {shortcuts ? `press ${move[0].toUpperCase()}` : "\u00a0"}
+          </span>
         </button>
       ))}
     </div>
@@ -833,22 +1157,38 @@ function ThrowRow({ onPlay, disabled }: { onPlay: (move: Move) => void; disabled
 
 /* ------------------------------------------------------------------ footer */
 
+/**
+ * What used to be a dump of the model name, vector width, engine and absolute
+ * database path. All of it is still here — one question mark down, where it
+ * can be read as prose instead of decoded.
+ */
 function Footer({ status }: { status: StatusResponse | null }) {
   if (!status) return null;
   return (
-    <footer className="flex flex-col gap-2">
-      <p className="readout flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] text-faint">
-        <span>{status.model}</span>
-        <span>{status.dimensions}d · cosine</span>
-        <span>engine: {status.implementation}</span>
-        {status.initMs !== null && <span>init {status.initMs}ms</span>}
-        <span className="truncate">{status.storagePath}</span>
-      </p>
-      <p className="text-[10px] leading-relaxed text-faint">
-        The hash check proves the AI&apos;s move did not change after you threw. It is not
-        a guarantee that the server is honest in general — it could always have committed
-        to a bad move in the first place.
-      </p>
+    <footer className="flex items-center justify-center gap-2">
+      <span className="eyebrow">Runs entirely on this machine</span>
+      <Explainer label="What is running behind the game" title="What's running">
+        <p>
+          Nothing leaves this computer. There is no account, no server in the cloud, and no
+          round is sent anywhere — the opponent, its memory and its maths all run here.
+        </p>
+        <p>
+          Turning each note about a round into numbers is done by a small open model called{" "}
+          <strong>{status.model}</strong>. It converts a note into {status.dimensions} numbers,
+          and how alike two notes are is measured as the angle between those two lists —
+          closer angle, more similar situation.
+        </p>
+        <p>
+          Memories are kept in a database file on disk. <strong>Export memory</strong> hands
+          you every round as plain text, and <strong>Reset AI memory</strong> erases the lot
+          and puts the opponent back to knowing nothing about you.
+        </p>
+        <p className="readout mt-3 border-t border-line pt-3">
+          {status.implementation} engine
+          {status.initMs !== null ? ` · started in ${status.initMs}ms` : ""}
+        </p>
+        <p className="readout">{status.storagePath}</p>
+      </Explainer>
     </footer>
   );
 }
