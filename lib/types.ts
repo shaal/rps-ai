@@ -100,6 +100,12 @@ export interface Reasoning {
   effectiveN: number;
   /** How decisively the winning move beat the runner-up, in [0,1]. */
   margin: number;
+  /**
+   * Share of the distribution taken from this player's base rate rather than
+   * from recalled episodes. Rises as confidence in the neighbourhood falls; at
+   * 1 the AI is playing the odds rather than a read. See `lib/prior.ts`.
+   */
+  priorWeight: number;
   /** True when the AI deliberately threw a random move instead of acting on its read. */
   explored: boolean;
   /** The closest episodes, for the "what the AI remembered" panel. */

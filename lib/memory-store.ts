@@ -12,6 +12,7 @@
  * this file not at all.
  */
 
+import type { MoveTally } from "./prior";
 import type { EpisodeMeta, Recalled } from "./types";
 
 export interface ExportedEpisodes {
@@ -56,6 +57,22 @@ export interface MemoryStore {
 
   /** Total episodes currently held. */
   size(): Promise<number>;
+
+  /**
+   * Index the next episode will be stamped with.
+   *
+   * Distinct from `size()`, and the distinction matters: this counter only ever
+   * climbs, whereas size stops at the retention cap. Recency decay measures age
+   * against this one, so substituting the size silently disables decay for any
+   * player who reaches the cap.
+   */
+  currentSeq(): Promise<number>;
+
+  /**
+   * Recency-weighted counts of what this player has thrown, for the base-rate
+   * prior. See `lib/prior.ts` for why the prediction needs a marginal at all.
+   */
+  moveTally(): Promise<MoveTally>;
 
   /** Wipe all learned memory and start from an empty store. */
   reset(): Promise<void>;

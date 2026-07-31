@@ -405,6 +405,17 @@ function ReadBlock({
         single memory decided it.
       </p>
 
+      {/* Only when it actually moved the number. A fifth metric in the grid
+          above would have cost a column at 320px, and this reads better as a
+          sentence anyway: it is a thing the AI did, not a measurement. */}
+      {reasoning.priorWeight >= 0.05 && (
+        <p className="mt-2 text-[0.75rem] leading-relaxed text-faint">
+          <strong>{Math.round(reasoning.priorWeight * 100)}% of this vote</strong> came from
+          your overall habits rather than from these memories. The AI leans on the odds when
+          the neighbourhood disagrees with itself and you throw one move more than the others.
+        </p>
+      )}
+
       {reasoning.explored && (
         <p className="mt-3 text-[0.75rem] leading-relaxed text-warn">
           Ignoring its read this round and throwing at random.

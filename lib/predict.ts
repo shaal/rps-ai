@@ -5,6 +5,7 @@
  * tested on synthetic episode lists.
  */
 
+import { UNIFORM_PRIOR, priorStrength } from "./prior";
 import { BEATS, MOVES, counter, randomMove, trailingMatchScore } from "./rps";
 import type { Intent, Mode, Move, Reasoning, Recalled } from "./types";
 
@@ -72,6 +73,8 @@ export interface AggregateResult {
   effectiveN: number;
   /** How decisively the winner beat the runner-up, in [0,1]. */
   margin: number;
+  /** Share of the final distribution taken from the base rate rather than memory. */
+  priorWeight: number;
   /** Input episodes annotated with the share of the vote each one carried. */
   weighted: Recalled[];
 }
@@ -83,8 +86,40 @@ const EMPTY_AGGREGATE: AggregateResult = {
   meanDistance: 0,
   effectiveN: 0,
   margin: 0,
+  priorWeight: 0,
   weighted: [],
 };
+
+export interface AggregateArgs {
+  recalled: Recalled[];
+  /**
+   * Monotonic index of the round being predicted, for recency decay.
+   *
+   * Must come from the same counter that stamped `meta.seq`, NOT from the store
+   * size. Those two agree right up until the episode cap, at which point the
+   * size freezes while `seq` keeps climbing — `age` then collapses to zero for
+   * every episode and recency weighting silently stops existing.
+   */
+  currentSeq: number;
+  /** Last few human moves, for the trailing-match re-rank. */
+  tail: string;
+  /** Total episodes held, for the cold-start term in confidence. */
+  memorySize: number;
+  /** This player's base rate. Defaults to uniform, which is inert in the blend. */
+  prior?: Record<Move, number>;
+}
+
+function argmax(distribution: Record<Move, number>): Move {
+  return MOVES.reduce((best, move) =>
+    distribution[move] > distribution[best] ? move : best,
+  );
+}
+
+/** How decisively the winner beat the runner-up. Zero on a tie, near one when lopsided. */
+function marginOf(distribution: Record<Move, number>): number {
+  const shares = MOVES.map((move) => distribution[move]).sort((a, b) => b - a);
+  return shares[0] + shares[1] > 0 ? (shares[0] - shares[1]) / (shares[0] + shares[1]) : 0;
+}
 
 /**
  * Distance-weighted vote over what the human played next in similar situations.
@@ -94,60 +129,51 @@ const EMPTY_AGGREGATE: AggregateResult = {
  *   - exponential recency decay (how current that habit still is),
  *   - a trailing-move match bonus (a hybrid re-rank against exact recent moves,
  *     which is more reliable than the embedding alone in this tight space).
+ *
+ * The result is then mixed with the player's base rate, because this vote can
+ * only answer "what followed situations like this one" and some players do not
+ * play a function of the situation at all. See `lib/prior.ts`.
  */
-export function aggregate(
-  recalled: Recalled[],
-  currentSeq: number,
-  currentTail: string,
-  memorySize: number,
-): AggregateResult {
-  if (recalled.length === 0) {
-    return { ...EMPTY_AGGREGATE, distribution: { ...ZERO_DISTRIBUTION } };
-  }
+export function aggregate({
+  recalled,
+  currentSeq,
+  tail,
+  memorySize,
+  prior = UNIFORM_PRIOR,
+}: AggregateArgs): AggregateResult {
+  // With no usable memory the base rate is still a real prediction, and a
+  // better one than a coin flip. Confidence stays at zero, so the score
+  // controller treats it as the guess it is.
+  const priorOnly = (): AggregateResult => ({
+    ...EMPTY_AGGREGATE,
+    distribution: { ...prior },
+    predictedHuman: argmax(prior),
+    margin: marginOf(prior),
+    priorWeight: 1,
+  });
+
+  if (recalled.length === 0) return priorOnly();
 
   const weights = recalled.map((episode) => {
     const proximity = 1 / (EPS + episode.distance * episode.distance);
     const age = Math.max(0, currentSeq - episode.meta.seq);
     const recency = Math.exp(-age / DECAY_TAU);
-    const match = trailingMatchScore(currentTail, episode.meta.historyTail);
+    const match = trailingMatchScore(tail, episode.meta.historyTail);
     return proximity * recency * (1 + MATCH_BONUS * match);
   });
 
   const totalWeight = weights.reduce((sum, w) => sum + w, 0);
-  if (totalWeight <= 0) {
-    return { ...EMPTY_AGGREGATE, distribution: { ...ZERO_DISTRIBUTION } };
-  }
+  if (totalWeight <= 0) return priorOnly();
 
-  const distribution: Record<Move, number> = { ...ZERO_DISTRIBUTION };
+  const memoryVote: Record<Move, number> = { ...ZERO_DISTRIBUTION };
   recalled.forEach((episode, i) => {
-    distribution[episode.meta.nextHumanMove] += weights[i] / totalWeight;
+    memoryVote[episode.meta.nextHumanMove] += weights[i] / totalWeight;
   });
-
-  const predictedHuman = MOVES.reduce((best, move) =>
-    distribution[move] > distribution[best] ? move : best,
-  );
 
   // Effective sample size: near 1 when a single memory dominates the vote,
   // near N when many memories contribute evenly.
   const sumSquares = weights.reduce((sum, w) => sum + w * w, 0);
   const effectiveN = (totalWeight * totalWeight) / sumSquares;
-
-  // Mean distance across only the episodes backing the winning move — the
-  // distance of contradicting memories says nothing about this prediction.
-  let backingWeight = 0;
-  let backingDistance = 0;
-  recalled.forEach((episode, i) => {
-    if (episode.meta.nextHumanMove !== predictedHuman) return;
-    backingWeight += weights[i];
-    backingDistance += weights[i] * episode.distance;
-  });
-  const meanDistance = backingWeight > 0 ? backingDistance / backingWeight : 0;
-
-  // How decisively the winner beat the runner-up. Zero when two moves tie, near
-  // one when the vote is lopsided.
-  const shares = MOVES.map((move) => distribution[move]).sort((a, b) => b - a);
-  const margin =
-    shares[0] + shares[1] > 0 ? (shares[0] - shares[1]) / (shares[0] + shares[1]) : 0;
 
   // Honest confidence: how decisively the winning move beat the alternative,
   // how many memories effectively contributed, and how much the AI has seen.
@@ -165,7 +191,41 @@ export function aggregate(
   // neighbourhood — it would look like a signal while measuring nothing.
   const support = clamp(effectiveN / SUPPORT_TARGET, 0, 1);
   const maturity = clamp(memorySize / COLD_START_EPISODES, 0, 1);
+  const memoryConfidence = marginOf(memoryVote) * support * maturity;
+
+  // How much to fall back on the base rate. This is gated on confidence in the
+  // *memory* specifically — the question being asked is "is this neighbourhood
+  // worth listening to", and only the pre-blend vote can answer it.
+  //
+  // The failure it exists to prevent is subtle: against a player with a fixed
+  // bias the memory's argmax is not biased, it is merely noisy, flipping
+  // between moves as twelve neighbours reshuffle. Blending in a stable estimate
+  // is variance reduction, which is why it can beat the memory without the
+  // memory being wrong on average.
+  const priorWeight = clamp((1 - memoryConfidence) * priorStrength(prior), 0, 1);
+  const distribution: Record<Move, number> = {
+    rock: (1 - priorWeight) * memoryVote.rock + priorWeight * prior.rock,
+    paper: (1 - priorWeight) * memoryVote.paper + priorWeight * prior.paper,
+    scissors: (1 - priorWeight) * memoryVote.scissors + priorWeight * prior.scissors,
+  };
+
+  const predictedHuman = argmax(distribution);
+
+  // Reported against the blend rather than the raw vote, so the number on
+  // screen describes the prediction actually being made.
+  const margin = marginOf(distribution);
   const confidence = margin * support * maturity;
+
+  // Mean distance across only the episodes backing the winning move — the
+  // distance of contradicting memories says nothing about this prediction.
+  let backingWeight = 0;
+  let backingDistance = 0;
+  recalled.forEach((episode, i) => {
+    if (episode.meta.nextHumanMove !== predictedHuman) return;
+    backingWeight += weights[i];
+    backingDistance += weights[i] * episode.distance;
+  });
+  const meanDistance = backingWeight > 0 ? backingDistance / backingWeight : 0;
 
   const weighted = recalled
     .map((episode, i) => ({ ...episode, influence: weights[i] / totalWeight }))
@@ -178,6 +238,7 @@ export function aggregate(
     meanDistance,
     effectiveN,
     margin,
+    priorWeight,
     weighted,
   };
 }
@@ -195,8 +256,16 @@ export function decide(
   topN: number,
   control: Reasoning["control"],
 ): Reasoning {
-  const { distribution, predictedHuman, confidence, meanDistance, effectiveN, margin, weighted } =
-    aggregateResult;
+  const {
+    distribution,
+    predictedHuman,
+    confidence,
+    meanDistance,
+    effectiveN,
+    margin,
+    priorWeight,
+    weighted,
+  } = aggregateResult;
 
   const base: Omit<Reasoning, "explored" | "playedAgainst"> = {
     mode: "adaptive",
@@ -209,6 +278,7 @@ export function decide(
     meanDistance,
     effectiveN,
     margin,
+    priorWeight,
     topNeighbors: weighted.slice(0, topN),
     control,
   };

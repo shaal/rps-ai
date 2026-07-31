@@ -37,7 +37,8 @@ The AI picks its move **before you throw**, and publishes a hash of it.
 3. **Searches** memory for the `k = 12` nearest past situations — an exact
    cosine scan, not an approximate index.
 4. **Aggregates** what you played next in those situations, weighting each
-   memory by three independent signals (below).
+   memory by three independent signals, then mixes in how often you throw each
+   move at all (below).
 5. **Picks a move**, keeps it with a random nonce, and surfaces only
    `sha256(move + ":" + nonce)`.
 
@@ -145,8 +146,35 @@ weight = 1/(ε + d²)  ×  exp(−age / 150)  ×  (1 + trailing-move match)
 - **Inverse squared distance** — how similar the situation was. `ε = 0.01`
   stops an exact match from taking effectively infinite weight.
 - **Recency decay** — old habits fade, so switching strategy actually works.
+  Age is measured against a counter that only ever climbs, deliberately not
+  against the number of episodes held: those agree until the 5000-episode
+  retention cap, after which the size freezes, every age collapses to zero and
+  decay would silently stop existing.
 - **Trailing-move match bonus** — a hybrid re-rank against your literal last
   moves.
+
+### The base rate
+
+That vote answers "what did you do after situations like this one". For a
+player whose next move does not depend on the situation it is the wrong
+question, so the result is mixed with a straight tally of how often you throw
+each move (`lib/prior.ts`):
+
+```
+P = (1 − w) × memory vote  +  w × base rate
+
+w = (1 − memory confidence) × prior strength
+```
+
+The tally is an exponential moving average with a ~100-round window, so a
+change of habit is followed rather than averaged against everything before it.
+Both terms in `w` are load-bearing. Confidence alone would hand the vote to the
+base rate exactly when a player switches strategy — the moment the memory is
+*correctly* unsure and the tally is a stale average of two regimes. **Prior
+strength** is the guard: total variation distance from uniform, saturating at a
+50/25/25 split, so a base rate with nothing to say stands down instead of
+shouting. Below that saturation point the deviation is within a few standard
+errors of what shuffling produces at this sample size.
 
 ### Confidence is not theater
 
@@ -222,17 +250,22 @@ averaged over 10 seeds. Chance is 33.3%.
 thrown most often. If the vector memory cannot beat that, it is not earning its
 complexity.
 
-| Opponent | memory | freq | delta |
-|---|---|---|---|
-| cyclic `R>P>S` | **100.0%** | 33.5% | +66.5pp |
-| win-stay lose-shift | **100.0%** | 33.5% | +66.5pp |
-| reacts to the AI's last move | **98.3%** | 33.0% | +65.2pp |
-| switches strategy at halfway | **96.5%** | 33.0% | +63.5pp |
-| frequency-biased (60% rock) | 51.7% | **59.3%** | **−7.7pp** |
-| genuinely random | 32.7% | 33.9% | −1.1pp |
-| **mean** | **79.9%** | 37.7% | |
+`k-NN` is the memory vote on its own, `blend` mixes in the player's base rate,
+and `lean` is how much of the vote that base rate took. Both predictors are
+scored on the same games, so the two columns are a like-for-like comparison
+rather than numbers from separate runs.
 
-Three things worth reading off that table.
+| Opponent | k-NN | blend | freq | delta | lean |
+|---|---|---|---|---|---|
+| cyclic `R>P>S` | 100.0% | **100.0%** | 33.5% | +66.5pp | 0.8% |
+| win-stay lose-shift | 100.0% | **100.0%** | 0.0% | +100.0pp | 1.9% |
+| reacts to the AI's last move | 98.3% | **98.3%** | 33.0% | +65.2pp | 3.1% |
+| switches strategy at halfway | 96.5% | **96.5%** | 33.0% | +63.5pp | 1.2% |
+| frequency-biased (60% rock) | 52.7% | 59.0% | **59.3%** | −0.4pp | 62.4% |
+| genuinely random | 33.3% | 33.9% | 33.9% | +0.0pp | 28.2% |
+| **mean** | 80.1% | **81.3%** | 32.1% | | |
+
+Four things worth reading off that table.
 
 **It recovers from a strategy change.** The switching opponent still lands at
 96.5%, which is the answer to the obvious worry about a high-contrast metric:
@@ -242,13 +275,22 @@ confidently wrong. Recency decay handles it.
 **It does not manufacture competence.** Against genuinely random play it sits at
 chance, where it belongs.
 
-**It loses to a trivial baseline against a stochastic player**, and this is the
-one real weakness the benchmark found. A player who is 60% rock has no pattern
-to retrieve — only a marginal bias — and k-NN goes looking for structure in
-noise while counting-the-most-common-move simply exploits it. The gap widens
-with more data (−4.9pp at 150 rounds, −7.7pp at 250), so it is a property of the
-approach rather than sampling. Blending a frequency prior into the vote when
-confidence is low would close it; that is not implemented.
+**It no longer loses to a trivial baseline.** This was the one real weakness the
+benchmark found, and it was structural. A player who is 60% rock has no pattern
+to retrieve — only a marginal bias — so k-NN went looking for structure in noise
+while counting-the-most-common-move simply exploited it. The gap grew with data
+(−4.9pp at 150 rounds, −7.7pp at 250), which is the signature of a wrong
+question rather than a small sample: twelve neighbours never stop being noisy,
+while a tally keeps converging. Mixing the base rate into the vote closes it to
+−0.4pp, and takes genuinely random play from −1.1pp to level.
+
+**The blend costs nothing anywhere else**, which is a design property rather
+than a lucky result. A uniform prior shifts all three moves equally and so
+cannot change which one wins; against an unbiased opponent it is arithmetically
+inert no matter how much weight it carries. The `lean` column shows the rest of
+the mechanism working — the base rate takes 62% of the vote against the biased
+player and stays between 0.8% and 3.1% against the four it would only get in the
+way of.
 
 One caveat on all of these: scripted opponents demonstrate the mechanism, they
 do not say anything about humans. Against someone actively trying to vary,
@@ -274,6 +316,7 @@ lib/
   rps.ts                pure game logic + the context builder
   feature-embed.ts      context string → 57-d unit vector   ← the encoder
   predict.ts            pure weighting, confidence, sampling
+  prior.ts              base-rate tally and how far to trust it
   score-control.ts      pure intent controller for Level and Yield
   commit.ts             pending commitments, hashing, one-shot semantics
   engine.ts             store lifecycle, commit and resolve

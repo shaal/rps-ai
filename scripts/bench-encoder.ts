@@ -17,6 +17,7 @@
 
 import { embedContext } from "../lib/feature-embed";
 import { aggregate } from "../lib/predict";
+import { EMPTY_TALLY, type MoveTally, observeMove, priorFrom } from "../lib/prior";
 import { RECALL_K } from "../lib/config";
 import { BEATS, buildContext, historyTail, invertOutcome, judge } from "../lib/rps";
 import type { EpisodeMeta, Move, Outcome, Recalled } from "../lib/types";
@@ -128,11 +129,15 @@ function run(player: Player, rounds: number, warmup: number) {
   const human: Move[] = [];
   const ai: Move[] = [];
   const outcomes: Outcome[] = [];
+  let tally: MoveTally = EMPTY_TALLY;
 
   let scored = 0;
   let hits = 0;
+  let memoryOnlyHits = 0;
   let baselineHits = 0;
   let seq = 0;
+  let leanSum = 0;
+  let leanCount = 0;
 
   for (let round = 0; round < rounds; round++) {
     const context = buildContext({ humanMoves: human, aiMoves: ai, outcomes });
@@ -140,9 +145,18 @@ function run(player: Player, rounds: number, warmup: number) {
 
     // Predict before seeing the throw — the same ordering the game enforces.
     let predicted: Move | null = null;
+    let memoryOnly: Move | null = null;
     if (store.length >= 6) {
       const hitsBack = recall(store, embedContext(context), Math.min(RECALL_K, store.length));
-      predicted = aggregate(hitsBack, seq, tail, store.length).predictedHuman;
+      const shared = { recalled: hitsBack, currentSeq: seq, tail, memorySize: store.length };
+      const blended = aggregate({ ...shared, prior: priorFrom(tally) });
+      predicted = blended.predictedHuman;
+      leanSum += blended.priorWeight;
+      leanCount++;
+      // Omitting the prior defaults it to uniform, which is inert in the blend
+      // — so this is exactly the pre-blend behaviour, measured side by side
+      // rather than claimed from a previous run on a different machine.
+      memoryOnly = aggregate(shared).predictedHuman;
     }
     const baseline = frequencyBaseline(human);
 
@@ -154,6 +168,7 @@ function run(player: Player, rounds: number, warmup: number) {
       if (predicted) {
         scored++;
         if (predicted === actual) hits++;
+        if (memoryOnly === actual) memoryOnlyHits++;
         if (baseline === actual) baselineHits++;
       }
     }
@@ -181,12 +196,16 @@ function run(player: Player, rounds: number, warmup: number) {
     human.push(actual);
     ai.push(aiMove);
     outcomes.push(outcome);
+    tally = observeMove(tally, actual);
   }
 
   return {
     scored,
     rate: scored ? hits / scored : 0,
+    memoryOnly: scored ? memoryOnlyHits / scored : 0,
     baseline: scored ? baselineHits / scored : 0,
+    /** Mean share of the vote the base rate took. Diagnoses the blend directly. */
+    lean: leanCount ? leanSum / leanCount : 0,
   };
 }
 
@@ -197,42 +216,54 @@ const WARMUP = 20;
 const SEEDS = [2, 3, 5, 11, 17, 23, 31, 41, 53, 67];
 
 console.log(`\n${ROUNDS} rounds per run, first ${WARMUP} discarded, ${SEEDS.length} seeds averaged.`);
-console.log("Chance is 33.3%. `memory` is the vector k-NN; `freq` is a most-common-move baseline.\n");
-console.log("opponent                        memory     freq    delta");
-console.log("──────────────────────────────────────────────────────────");
+console.log("Chance is 33.3%.  `k-NN` is the memory vote alone, `blend` mixes in the");
+console.log("base rate, `freq` is a most-common-move baseline. `delta` is blend - freq:");
+console.log("the column that has to stop being negative.\n");
+console.log("`lean` is how much of the vote the base rate took, averaged over rounds.\n");
+console.log("opponent                         k-NN    blend     freq    delta   lean");
+console.log("─────────────────────────────────────────────────────────────────────────");
 
+let totalBlend = 0;
 let totalMemory = 0;
 let totalBaseline = 0;
 
 for (const player of makePlayers(SEEDS[0])) {
   let rate = 0;
+  let memoryOnly = 0;
   let base = 0;
+  let lean = 0;
   for (const seed of SEEDS) {
     const fresh = makePlayers(seed).find((p) => p.name === player.name)!;
     const result = run(fresh, ROUNDS, WARMUP);
     rate += result.rate;
+    memoryOnly += result.memoryOnly;
     base += result.baseline;
+    lean += result.lean;
   }
   rate /= SEEDS.length;
+  memoryOnly /= SEEDS.length;
   base /= SEEDS.length;
-  totalMemory += rate;
+  lean /= SEEDS.length;
+  totalBlend += rate;
+  totalMemory += memoryOnly;
   totalBaseline += base;
 
   const delta = rate - base;
   console.log(
-    `${player.name.padEnd(30)}${(rate * 100).toFixed(1).padStart(6)}%  ${(base * 100)
-      .toFixed(1)
-      .padStart(6)}%  ${(delta >= 0 ? "+" : "") + (delta * 100).toFixed(1).padStart(6)}pp`,
+    `${player.name.padEnd(30)}${pct(memoryOnly)}  ${pct(rate)}  ${pct(base)}  ${(
+      (delta >= 0 ? "+" : "") + (delta * 100).toFixed(1)
+    ).padStart(6)}pp  ${pct(lean)}`,
   );
 }
 
 const n = makePlayers(1).length;
-console.log("──────────────────────────────────────────────────────────");
+console.log("─────────────────────────────────────────────────────────────────────────");
 console.log(
-  `${"mean".padEnd(30)}${((totalMemory / n) * 100).toFixed(1).padStart(6)}%  ${(
-    (totalBaseline / n) *
-    100
-  )
-    .toFixed(1)
-    .padStart(6)}%\n`,
+  `${"mean".padEnd(30)}${pct(totalMemory / n)}  ${pct(totalBlend / n)}  ${pct(
+    totalBaseline / n,
+  )}\n`,
 );
+
+function pct(value: number): string {
+  return `${(value * 100).toFixed(1).padStart(5)}%`;
+}

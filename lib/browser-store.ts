@@ -25,6 +25,7 @@
 
 import { FEATURE_DIMENSIONS, FEATURE_MODEL_ID, embedContext } from "./feature-embed";
 import type { ExportedEpisodes, MemoryStore, StoreInfo } from "./memory-store";
+import { EMPTY_TALLY, type MoveTally, observeMove, tallyOf } from "./prior";
 import type { EpisodeMeta, Recalled } from "./types";
 
 const DB_NAME = "rps-memory";
@@ -52,6 +53,7 @@ export class BrowserMemoryStore implements MemoryStore {
   private rows = 0;
   private episodes: StoredEpisode[] = [];
   private seq = 0;
+  private tally: MoveTally = EMPTY_TALLY;
   private initMs: number | null = null;
 
   /* ------------------------------------------------------------ lifecycle */
@@ -94,6 +96,12 @@ export class BrowserMemoryStore implements MemoryStore {
     });
     this.rows = this.episodes.length;
 
+    // Replayed in order rather than persisted, for the same reason the matrix
+    // is: it is a pure function of the episode list, so recomputing it removes
+    // any way for a stored summary to drift out of step with the episodes it
+    // claims to summarise.
+    this.tally = tallyOf(this.episodes.map((episode) => episode.meta.nextHumanMove));
+
     this.initMs = Math.round(performance.now() - started);
   }
 
@@ -117,6 +125,9 @@ export class BrowserMemoryStore implements MemoryStore {
     this.matrix.set(embedContext(context), this.rows * FEATURE_DIMENSIONS);
     this.rows++;
     this.episodes.push({ id, meta: stamped });
+    // No matching adjustment in `trim()`: the tally decays exponentially, so an
+    // episode old enough to be evicted has already decayed to nothing.
+    this.tally = observeMove(this.tally, stamped.nextHumanMove);
 
     // One small write per episode. An earlier version rewrote the entire
     // vector matrix here, which is quadratic disk traffic over a session.
@@ -179,12 +190,23 @@ export class BrowserMemoryStore implements MemoryStore {
     return this.rows;
   }
 
+  async currentSeq(): Promise<number> {
+    await this.init();
+    return this.seq;
+  }
+
+  async moveTally(): Promise<MoveTally> {
+    await this.init();
+    return this.tally;
+  }
+
   async reset(): Promise<void> {
     await this.init();
     this.matrix = new Float32Array(0);
     this.rows = 0;
     this.episodes = [];
     this.seq = 0;
+    this.tally = EMPTY_TALLY;
     await this.tx("readwrite", (s) => s.clear());
   }
 

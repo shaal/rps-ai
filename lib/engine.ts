@@ -26,6 +26,7 @@ import {
 import { BrowserMemoryStore } from "./browser-store";
 import type { MemoryStore } from "./memory-store";
 import { aggregate, decide, moveFor } from "./predict";
+import { priorFrom } from "./prior";
 import { decideIntent } from "./score-control";
 import {
   buildContext,
@@ -402,12 +403,16 @@ async function think({
     return { reasoning, aiMove: randomMove(), nextIntegral: 0 };
   }
 
-  const aggregated = aggregate(
-    recalled.map((episode) => ({ ...episode, influence: 0 })),
-    memorySize,
+  const aggregated = aggregate({
+    recalled: recalled.map((episode) => ({ ...episode, influence: 0 })),
+    // Not `memorySize`. The two agree until the retention cap, after which the
+    // size freezes while episode indices keep climbing, and every `age` in the
+    // recency term collapses to zero.
+    currentSeq: await store.currentSeq(),
     tail,
     memorySize,
-  );
+    prior: priorFrom(await store.moveTally()),
+  });
 
   const { error, humanWinStreak } = scoreFrom(history);
   const decision = decideIntent({
@@ -465,6 +470,10 @@ function bootstrapReasoning(context: string): Reasoning {
     meanDistance: 0,
     effectiveN: 0,
     margin: 0,
+    // The base rate is not used while bootstrapping. With fewer than
+    // MIN_MEMORY_FOR_ADAPTIVE episodes behind it the tally is still within a
+    // pseudo-count of uniform, so acting on it would dress up a coin flip.
+    priorWeight: 0,
     explored: true,
     topNeighbors: [],
     control: null,
