@@ -2,9 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { MemoryPanel } from "./memory-panel";
+import { InstrumentPanel, type View } from "./instrument-panel";
 import { MOVE_HEX, MOVE_LABEL, MoveGlyph } from "./move-glyph";
-import { RevealPanel } from "./reveal-panel";
 import { Telemetry } from "./telemetry";
 import { BOOTSTRAP_ROUNDS } from "@/lib/config";
 import { MODE_PROFILES } from "@/lib/predict";
@@ -14,6 +13,7 @@ import type {
   Mode,
   Move,
   Outcome,
+  PeekResponse,
   RoundRecord,
   RoundResponse,
   StatusResponse,
@@ -45,7 +45,8 @@ export function Game() {
   const [commit, setCommit] = useState<CommitResponse | null>(null);
   const [resolving, setResolving] = useState(false);
   const [mode, setMode] = useState<Mode>("dominate");
-  const [reveal, setReveal] = useState(false);
+  const [view, setView] = useState<View>("hindsight");
+  const [peek, setPeek] = useState<PeekResponse | null>(null);
   const [verification, setVerification] = useState<Verification>("idle");
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -59,9 +60,25 @@ export function Game() {
   /** No commitment in hand means one is on its way. */
   const committing = ready && commit === null;
 
+  /** The sealed move for the pending round is still being fetched. */
+  const peeking = view === "foresight" && commit !== null && peek?.commitId !== commit.commitId;
+
   /** Synchronous latch — React state updates are async and two clicks can race. */
   const inFlight = useRef(false);
   const sessionIdRef = useRef<string | null>(null);
+
+  /**
+   * The current view, readable without making it a commit dependency.
+   *
+   * The server only uses it as a hint for the Level controller (which stops
+   * steering against a player who can see its hand). Making it a dependency
+   * would re-commit on every flip, and re-committing would mint a new move and
+   * a new hash — so looking at the answer would change the answer.
+   */
+  const viewRef = useRef<View>("hindsight");
+  useEffect(() => {
+    viewRef.current = view;
+  }, [view]);
 
   /**
    * One stable session id per browser, so the server can supersede stale
@@ -132,7 +149,7 @@ export function Game() {
           body: JSON.stringify({
             sessionId: getSessionId(),
             mode,
-            revealed: reveal,
+            revealed: viewRef.current === "foresight",
             round: history.length + 1,
             history: history.map((round) => ({
               humanMove: round.humanMove,
@@ -156,7 +173,41 @@ export function Game() {
     return () => {
       cancelled = true;
     };
-  }, [ready, mode, reveal, history, commitNonce, getSessionId]);
+  }, [ready, mode, history, commitNonce, getSessionId]);
+
+  /**
+   * Open the sealed move when the instrument is pointed at Foresight.
+   *
+   * Read-only on the server: it does not consume or replace the commitment, so
+   * flipping back and forth never changes what the AI is about to play, and the
+   * hash already on screen stays the one that gets verified.
+   */
+  useEffect(() => {
+    if (view !== "foresight" || !commit) return;
+    if (peek?.commitId === commit.commitId) return;
+    let cancelled = false;
+
+    const load = async () => {
+      try {
+        const response = await fetch("/api/peek", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sessionId: getSessionId(), commitId: commit.commitId }),
+        });
+        const data = await response.json();
+        if (cancelled || !response.ok) return;
+        setPeek(data as PeekResponse);
+      } catch {
+        // A stale commitment resolves itself: the commit effect fetches a new
+        // one and this runs again against it.
+      }
+    };
+
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, [view, commit, peek?.commitId, getSessionId]);
 
   const play = useCallback(
     async (move: Move) => {
@@ -327,13 +378,6 @@ export function Game() {
             verification={verification}
           />
 
-          <RevealPanel
-            open={reveal}
-            onToggle={() => setReveal((open) => !open)}
-            commit={commit}
-            committing={committing}
-          />
-
           <ThrowRow
             onPlay={play}
             disabled={!ready || resolving || resetting || !commit}
@@ -342,10 +386,14 @@ export function Game() {
           <Telemetry history={history} memorySize={status?.memorySize ?? 0} />
         </div>
 
-        <MemoryPanel
-          reasoning={last?.reasoning ?? null}
+        <InstrumentPanel
+          view={view}
+          onView={setView}
+          hindsight={last?.reasoning ?? null}
+          hindsightRound={last?.round ?? null}
+          foresight={peek}
           scanning={resolving}
-          round={last?.round ?? null}
+          peeking={peeking}
         />
       </main>
 

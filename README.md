@@ -68,29 +68,38 @@ Hardening, because a commitment scheme with holes is worse than none:
 | Memory reset while a commitment is open | Rejected with `stale-memory` |
 | Expiry (30 min) or a server restart | Rejected, client silently re-commits |
 
-### The reveal panel
+### The instrument: Hindsight and Foresight
 
-**The AI's hand** is collapsed by default. Open it and you see the move it has
-already locked in, what it expects you to play, and why — so you can beat it
-every single round. That is the intended behaviour, and it is verified: a
-scripted player that peeks and counters wins **30/30 in all three modes**.
+The left column is the game — score, throws, telemetry. Everything the AI is
+thinking lives in one panel on the right, which flips between two faces:
 
-When the panel is closed the server returns only the hash, so a glance at the
+- **Hindsight** (default) — how it read the round you just played.
+- **Foresight** — the move it has already sealed for the round you are about to
+  throw, so you can beat it every single time. Verified: a scripted player that
+  looks and counters wins **30/30 in all three modes**.
+
+These were two separate panels once, which put two different rounds on screen
+simultaneously and made their confidence figures look contradictory. They were
+never inconsistent — they were one round apart. Showing exactly one round at a
+time removes the problem by construction instead of labelling around it.
+
+**Looking does not change the answer.** Foresight calls `POST /api/peek`, which
+reads the sealed commitment without consuming or replacing it. An earlier design
+re-committed with a `revealed` flag, which would have minted a fresh move and a
+fresh hash every time you flipped — so peeking would have silently re-rolled
+what the AI was about to play and invalidated a hash already on screen. Now the
+commitment is created once per round, the flip only opens it, and the hash in
+the stage strip is unchanged by flipping. Ten tests cover this, including
+repeated peeks returning the same move, the commitment still resolving
+afterwards, and the hash still verifying.
+
+While Hindsight is showing, the server sends only the hash, so a glance at the
 network tab cannot spoil an ordinary game. That is spoiler control, not
-security — you can obviously flip the flag yourself.
+security — you can obviously call `/api/peek` yourself.
 
-**The two panels are always one round apart.** The reveal panel describes the
-round you have not thrown yet; **Memory recall** on the right is retrospective
-and describes the round you just played. Their confidence figures therefore
-differ at any given moment, which looks like an inconsistency until you notice
-they are about different rounds — so both now label theirs (`round 13 · not
-thrown yet` against `round 12 · played`).
-
-They are the same numbers, one step apart: `resolveRound` returns the exact
-reasoning object stored at commit time, so once a round is thrown the memory
-panel shows precisely what the reveal panel showed beforehand. Verified in the
-browser — reveal at round 13 read `44/26/30, conf 10%`, and after throwing, the
-memory panel read `44/26/30, conf 10%`.
+The current view is also sent to `/api/commit` as a hint, purely so the Level
+controller can stop steering against a player who can see its hand. It is read
+from a ref rather than a dependency, so flipping never triggers a re-commit.
 
 ### The context string is coded, not prose
 
@@ -217,7 +226,7 @@ Against a scripted player, mode `dominate` unless noted:
 | Strategy switch mid-game | 100% → **27%** immediately after the switch → 88% → **100%** |
 | Genuinely random player | read rate **30%** ≈ chance, human 26 / AI 23 |
 | Confidence | **0.67** on a perfect read vs **0.20** on random play |
-| Peeking at the reveal panel | human wins **30/30**, in all three modes |
+| Using Foresight and countering | human wins **30/30**, in all three modes |
 
 The strategy-switch row is the interesting one: recency decay means it goes
 blind when you change tactics, then re-learns you.
@@ -237,6 +246,7 @@ working while it does.
 app/
   page.tsx              server shell, kicks off model warmup
   api/commit/route.ts   lock in the next move, return only its hash
+  api/peek/route.ts     disclose the sealed move without consuming or changing it
   api/round/route.ts    open the commitment against a throw, record the episode
   api/status/route.ts   warmup state, memory size, engine info
   api/reset/route.ts    erase all memory
@@ -252,9 +262,8 @@ lib/
   config.ts             thresholds shared by server and client
 components/
   game.tsx              state, commit lifecycle, hash verification, keyboard
-  reveal-panel.tsx      the AI's pending hand, collapsed by default
-  proximity-scope.tsx   the radial memory readout
-  memory-panel.tsx      context, prediction, strongest memories
+  instrument-panel.tsx  the flipping Hindsight / Foresight panel
+  proximity-scope.tsx   the radial memory readout, shared by both faces
   telemetry.tsx         stats, read-rate sparkline, recent rounds
 data/                   the persistent store (gitignored)
 ```

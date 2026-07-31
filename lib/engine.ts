@@ -19,6 +19,7 @@ import {
   getSessionState,
   newId,
   newNonce,
+  peekCommit,
   putCommit,
   setSessionIntegral,
   takeCommit,
@@ -41,6 +42,7 @@ import type {
   Mode,
   Move,
   Outcome,
+  PeekResponse,
   Reasoning,
   RoundResponse,
   StatusResponse,
@@ -254,17 +256,28 @@ export async function commitRound(request: CommitRequest): Promise<CommitRespons
     expiresAt: expiryFrom(now),
   });
 
-  return {
-    commitId,
-    hash,
-    expiresAt: expiryFrom(now),
-    round,
-    memorySize,
-    mode,
-    // Only disclosed when the player has asked to see it, so an ordinary game
-    // cannot be spoiled by glancing at the network tab.
-    reveal: revealed ? { aiMove, reasoning } : null,
-  };
+  // Always hash-only. Disclosure is a separate, non-destructive call, so an
+  // ordinary game cannot be spoiled by glancing at the network tab and looking
+  // at the answer cannot change it.
+  return { commitId, hash, expiresAt: expiryFrom(now), round, memorySize, mode };
+}
+
+/**
+ * Disclose the sealed move for the pending commitment.
+ *
+ * Read-only: the commitment is not consumed and not replaced, so switching to
+ * the Foresight view cannot re-roll what the AI is about to play, and the hash
+ * already on screen stays the one that will be verified.
+ */
+export async function peekRound(request: {
+  sessionId: string;
+  commitId: string;
+}): Promise<PeekResponse> {
+  const peeked = peekCommit(request.commitId, request.sessionId);
+  if (!peeked.ok) throw new CommitmentError(peeked.reason);
+
+  const { commitId, aiMove, reasoning, round } = peeked.commit;
+  return { commitId, aiMove, reasoning, round };
 }
 
 /**
