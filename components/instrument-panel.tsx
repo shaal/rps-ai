@@ -5,7 +5,6 @@ import { useState } from "react";
 import { Explainer } from "./explainer";
 import { MOVE_HEX, MOVE_LABEL, MoveGlyph } from "./move-glyph";
 import { ProximityScope } from "./proximity-scope";
-import { HEURISTICS, MEMORY_EXPERT } from "@/lib/experts";
 import { MOVES } from "@/lib/rps";
 import type { Intent, Move, PeekResponse, Reasoning } from "@/lib/types";
 
@@ -411,7 +410,7 @@ function ReadBlock({
           sentence anyway: it is a thing the AI did, not a measurement. */}
       {reasoning.priorWeight >= 0.05 && (
         <p className="mt-2 text-[0.75rem] leading-relaxed text-faint">
-          <strong>{Math.round(reasoning.priorWeight * 100)}% of that read</strong> came from
+          <strong>{Math.round(reasoning.priorWeight * 100)}% of this vote</strong> came from
           your overall habits rather than from these memories. The AI leans on the odds when
           the neighbourhood disagrees with itself and you throw one move more than the others.
         </p>
@@ -422,55 +421,6 @@ function ReadBlock({
           Ignoring its read this round and throwing at random.
         </p>
       )}
-
-      <Standings contributions={reasoning.contributions} />
-    </div>
-  );
-}
-
-/**
- * Who actually got a say this round.
- *
- * The memory is one predictor among several, and which of them is currently
- * trusted is the single most interesting thing about how the AI is playing —
- * it names what the AI thinks you are doing. Hidden entirely while the memory
- * is carrying the round on its own, which is most of the time and would
- * otherwise be a row saying "memory 98%" forever.
- */
-function Standings({ contributions }: { contributions: Record<string, number> }) {
-  const voting = Object.entries(contributions)
-    .filter(([, share]) => share >= 0.05)
-    .sort((a, b) => b[1] - a[1]);
-
-  const challenged = voting.some(([name, share]) => name !== MEMORY_EXPERT && share >= 0.05);
-  if (!challenged) return null;
-
-  const blurbFor = (name: string) =>
-    name === MEMORY_EXPERT
-      ? "What you did in situations that looked like this one."
-      : (HEURISTICS.find((expert) => expert.name === name)?.blurb ?? "");
-
-  return (
-    <div className="mt-4">
-      <h4 className="eyebrow mb-2">Who called it</h4>
-      <dl className="flex flex-col gap-1.5">
-        {voting.map(([name, share]) => (
-          <div key={name} className="flex items-baseline justify-between gap-3">
-            <dt className="text-[0.75rem] text-faint">
-              <span className="text-ink">{name}</span>{" "}
-              <span className="hidden sm:inline">{blurbFor(name)}</span>
-            </dt>
-            <dd className="readout shrink-0 text-[0.6875rem] text-faint">
-              {Math.round(share * 100)}%
-            </dd>
-          </div>
-        ))}
-      </dl>
-      <p className="mt-2 text-[0.75rem] leading-relaxed text-faint">
-        Each of these is a separate guess about what you are doing, and each one&apos;s share
-        is how well it has been calling your throws lately. When one of them beats the
-        memory, the memory stops being the one the AI listens to.
-      </p>
     </div>
   );
 }

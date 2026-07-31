@@ -16,16 +16,8 @@
  */
 
 import { embedContext } from "../lib/feature-embed";
-import {
-  EVEN_WEIGHTS,
-  type ExpertWeights,
-  MEMORY_EXPERT,
-  combine,
-  opinionsFrom,
-  reweigh,
-} from "../lib/experts";
 import { aggregate } from "../lib/predict";
-import { EMPTY_TALLY, type MoveTally, observeMove, priorFrom, priorStrength } from "../lib/prior";
+import { EMPTY_TALLY, type MoveTally, observeMove, priorFrom } from "../lib/prior";
 import { RECALL_K } from "../lib/config";
 import { BEATS, buildContext, historyTail, invertOutcome, judge } from "../lib/rps";
 import type { EpisodeMeta, Move, Outcome, Recalled } from "../lib/types";
@@ -92,13 +84,6 @@ function makePlayers(seed: number): Player[] {
     },
     {
       name: "restless (new tactic every 25)",
-      // The case a committee is actually for, and the one every other opponent
-      // here fails to test. The four scripted tactics below are each read at
-      // 96-100% by the memory alone, so a panel of heuristics has nothing to
-      // add — it can only dilute. This player rotates through them fast enough
-      // that recalled episodes are usually from the *previous* tactic, which is
-      // the one situation where "bet on whichever predictor is paying right
-      // now" should beat "find the most similar past situation".
       next: ({ human, ai, outcomes }, round) => {
         const tactic = Math.floor(round / 25) % 4;
         const lastHuman = human[human.length - 1];
@@ -113,6 +98,80 @@ function makePlayers(seed: number): Player[] {
     {
       name: "genuinely random",
       next: () => MOVES[Math.floor(rand() * 3)],
+    },
+  ];
+}
+
+/**
+ * A second set, written to be unlike anything the predictor was tuned against.
+ *
+ * These exist because of a mistake worth not repeating. An expert-committee
+ * change was measured against the set above, could not be justified by it, and
+ * was then "rescued" by adding an opponent built to suit it and by fitting four
+ * constants to the resulting table. Scored on this set, with those constants
+ * frozen, it came out at -0.5pp mean and -2.7pp on its worst case, and was
+ * reverted.
+ *
+ * The rule that produced these: an opponent must not be a restatement of any
+ * mechanism in the predictor. `Markov on own last throw` is the one that
+ * mattered — a player whose bias is in the *transitions* rather than the
+ * marginal, which is invisible to any test that only looks at how often each
+ * move is thrown.
+ */
+function makeHeldoutPlayers(seed: number): Player[] {
+  const rand = rng(seed);
+
+  // Fixed once, never tuned. Deliberately not a rotation.
+  const MARKOV: Record<Move, [number, number, number]> = {
+    rock: [0.5, 0.2, 0.3],
+    paper: [0.2, 0.3, 0.5],
+    scissors: [0.4, 0.4, 0.2],
+  };
+  const sample = (weights: [number, number, number]): Move => {
+    let ticket = rand();
+    for (let i = 0; i < 3; i++) {
+      ticket -= weights[i];
+      if (ticket <= 0) return MOVES[i];
+    }
+    return MOVES[2];
+  };
+
+  let bias: [number, number, number] = [1 / 3, 1 / 3, 1 / 3];
+  let expires = 0;
+
+  return [
+    {
+      name: "copies the AI's last move",
+      next: ({ ai }) => (ai.length ? ai[ai.length - 1] : "rock"),
+    },
+    {
+      name: "lose-stay win-shift",
+      next: ({ human, outcomes }) => {
+        if (human.length === 0) return "paper";
+        const previous = human[human.length - 1];
+        return outcomes[outcomes.length - 1] === "win" ? BEATS[previous] : previous;
+      },
+    },
+    {
+      name: "Markov on own last throw",
+      next: ({ human }) => (human.length ? sample(MARKOV[human[human.length - 1]]) : "rock"),
+    },
+    {
+      // Regime change with nothing built to catch it.
+      name: "sticky random (new bias 15-40)",
+      next: (_h, round) => {
+        if (round >= expires) {
+          const raw: [number, number, number] = [rand(), rand(), rand()];
+          const total = raw[0] + raw[1] + raw[2];
+          bias = [raw[0] / total, raw[1] / total, raw[2] / total];
+          expires = round + 15 + Math.floor(rand() * 26);
+        }
+        return sample(bias);
+      },
+    },
+    {
+      name: "four-beat R,R,P,S",
+      next: (_h, round) => (["rock", "rock", "paper", "scissors"] as Move[])[round % 4],
     },
   ];
 }
@@ -158,11 +217,10 @@ function run(player: Player, rounds: number, warmup: number) {
   const ai: Move[] = [];
   const outcomes: Outcome[] = [];
   let tally: MoveTally = EMPTY_TALLY;
-  let weights: ExpertWeights = EVEN_WEIGHTS;
 
   let scored = 0;
   let hits = 0;
-  let blendHits = 0;
+  let memoryOnlyHits = 0;
   let baselineHits = 0;
   let seq = 0;
   let leanSum = 0;
@@ -174,25 +232,18 @@ function run(player: Player, rounds: number, warmup: number) {
 
     // Predict before seeing the throw — the same ordering the game enforces.
     let predicted: Move | null = null;
-    let blendOnly: Move | null = null;
-    let opinions: ReturnType<typeof opinionsFrom> | null = null;
+    let memoryOnly: Move | null = null;
     if (store.length >= 6) {
       const hitsBack = recall(store, embedContext(context), Math.min(RECALL_K, store.length));
-      const baseRate = priorFrom(tally);
-      const blended = aggregate({
-        recalled: hitsBack,
-        currentSeq: seq,
-        tail,
-        memorySize: store.length,
-        prior: baseRate,
-      });
-      blendOnly = blended.predictedHuman;
-
-      opinions = opinionsFrom({ human, ai, outcomes }, blended.distribution);
-      const panel = combine(opinions, weights, 1 - priorStrength(baseRate));
-      predicted = argmaxOf(panel.distribution);
-      leanSum += panel.contributions[MEMORY_EXPERT] ?? 0;
+      const shared = { recalled: hitsBack, currentSeq: seq, tail, memorySize: store.length };
+      const blended = aggregate({ ...shared, prior: priorFrom(tally) });
+      predicted = blended.predictedHuman;
+      leanSum += blended.priorWeight;
       leanCount++;
+      // Omitting the prior defaults it to uniform, which is inert in the blend
+      // — so this is exactly the pre-blend behaviour, measured side by side
+      // rather than claimed from a previous run on a different machine.
+      memoryOnly = aggregate(shared).predictedHuman;
     }
     const baseline = frequencyBaseline(human);
 
@@ -204,13 +255,10 @@ function run(player: Player, rounds: number, warmup: number) {
       if (predicted) {
         scored++;
         if (predicted === actual) hits++;
-        if (blendOnly === actual) blendHits++;
+        if (memoryOnly === actual) memoryOnlyHits++;
         if (baseline === actual) baselineHits++;
       }
     }
-
-    // Standings move on what actually happened, after the prediction is locked.
-    if (opinions) weights = reweigh(weights, opinions, actual);
 
     // The AI counters its read; without this its own moves never enter the
     // context and any opponent reacting to the AI cannot be modelled.
@@ -241,17 +289,11 @@ function run(player: Player, rounds: number, warmup: number) {
   return {
     scored,
     rate: scored ? hits / scored : 0,
-    blend: scored ? blendHits / scored : 0,
+    memoryOnly: scored ? memoryOnlyHits / scored : 0,
     baseline: scored ? baselineHits / scored : 0,
-    /** Mean share of the committee vote the memory held. Diagnoses the panel directly. */
+    /** Mean share of the vote the base rate took. Diagnoses the blend directly. */
     lean: leanCount ? leanSum / leanCount : 0,
   };
-}
-
-function argmaxOf(distribution: Record<Move, number>): Move {
-  return MOVES.reduce((best, move) =>
-    distribution[move] > distribution[best] ? move : best,
-  );
 }
 
 /* ----------------------------------------------------------------- main */
@@ -261,53 +303,59 @@ const WARMUP = 20;
 const SEEDS = [2, 3, 5, 11, 17, 23, 31, 41, 53, 67];
 
 console.log(`\n${ROUNDS} rounds per run, first ${WARMUP} discarded, ${SEEDS.length} seeds averaged.`);
-console.log("Chance is 33.3%.  `blend` is the memory vote mixed with the base rate,");
-console.log("`panel` adds the expert committee on top, `freq` is a most-common-move");
-console.log("baseline. `gain` is panel - blend: what the committee bought.");
-console.log("`mem` is the memory's own share of the committee vote.\n");
-console.log("opponent                        blend    panel     freq     gain    mem");
-console.log("─────────────────────────────────────────────────────────────────────────");
+console.log("Chance is 33.3%.  `k-NN` is the memory vote alone, `blend` mixes in the");
+console.log("base rate, `freq` is a most-common-move baseline. `delta` is blend - freq:");
+console.log("the column that has to stop being negative.\n");
+console.log("`lean` is how much of the vote the base rate took, averaged over rounds.\n");
+table("FAMILIAR — opponents the predictor has been developed against", makePlayers);
+table("HELD OUT — unlike any mechanism in the predictor; do not tune on these", makeHeldoutPlayers);
 
-let totalPanel = 0;
-let totalBlend = 0;
-let totalBaseline = 0;
+function table(title: string, build: (seed: number) => Player[]) {
+  console.log(`${title}\n`);
+  console.log("opponent                         k-NN    blend     freq    delta   lean");
+  console.log("─────────────────────────────────────────────────────────────────────────");
 
-for (const player of makePlayers(SEEDS[0])) {
-  let rate = 0;
-  let blend = 0;
-  let base = 0;
-  let lean = 0;
-  for (const seed of SEEDS) {
-    const fresh = makePlayers(seed).find((p) => p.name === player.name)!;
-    const result = run(fresh, ROUNDS, WARMUP);
-    rate += result.rate;
-    blend += result.blend;
-    base += result.baseline;
-    lean += result.lean;
+  let totalBlend = 0;
+  let totalMemory = 0;
+  let totalBaseline = 0;
+
+  for (const player of build(SEEDS[0])) {
+    let rate = 0;
+    let memoryOnly = 0;
+    let base = 0;
+    let lean = 0;
+    for (const seed of SEEDS) {
+      const fresh = build(seed).find((p) => p.name === player.name)!;
+      const result = run(fresh, ROUNDS, WARMUP);
+      rate += result.rate;
+      memoryOnly += result.memoryOnly;
+      base += result.baseline;
+      lean += result.lean;
+    }
+    rate /= SEEDS.length;
+    memoryOnly /= SEEDS.length;
+    base /= SEEDS.length;
+    lean /= SEEDS.length;
+    totalBlend += rate;
+    totalMemory += memoryOnly;
+    totalBaseline += base;
+
+    const delta = rate - base;
+    console.log(
+      `${player.name.padEnd(30)}${pct(memoryOnly)}  ${pct(rate)}  ${pct(base)}  ${(
+        (delta >= 0 ? "+" : "") + (delta * 100).toFixed(1)
+      ).padStart(6)}pp  ${pct(lean)}`,
+    );
   }
-  rate /= SEEDS.length;
-  blend /= SEEDS.length;
-  base /= SEEDS.length;
-  lean /= SEEDS.length;
-  totalPanel += rate;
-  totalBlend += blend;
-  totalBaseline += base;
 
-  const gain = rate - blend;
+  const n = build(1).length;
+  console.log("─────────────────────────────────────────────────────────────────────────");
   console.log(
-    `${player.name.padEnd(30)}${pct(blend)}  ${pct(rate)}  ${pct(base)}  ${(
-      (gain >= 0 ? "+" : "") + (gain * 100).toFixed(1)
-    ).padStart(6)}pp  ${pct(lean)}`,
+    `${"mean".padEnd(30)}${pct(totalMemory / n)}  ${pct(totalBlend / n)}  ${pct(
+      totalBaseline / n,
+    )}\n`,
   );
 }
-
-const n = makePlayers(1).length;
-console.log("─────────────────────────────────────────────────────────────────────────");
-console.log(
-  `${"mean".padEnd(30)}${pct(totalBlend / n)}  ${pct(totalPanel / n)}  ${pct(
-    totalBaseline / n,
-  )}\n`,
-);
 
 function pct(value: number): string {
   return `${(value * 100).toFixed(1).padStart(5)}%`;

@@ -75,8 +75,6 @@ export interface AggregateResult {
   margin: number;
   /** Share of the final distribution taken from the base rate rather than memory. */
   priorWeight: number;
-  /** Each predictor's share of the final vote. Empty until a committee is applied. */
-  contributions: Record<string, number>;
   /** Input episodes annotated with the share of the vote each one carried. */
   weighted: Recalled[];
 }
@@ -89,7 +87,6 @@ const EMPTY_AGGREGATE: AggregateResult = {
   effectiveN: 0,
   margin: 0,
   priorWeight: 0,
-  contributions: {},
   weighted: [],
 };
 
@@ -242,38 +239,7 @@ export function aggregate({
     effectiveN,
     margin,
     priorWeight,
-    // Filled in by `applyCommittee`. On its own the memory is the only voice.
-    contributions: {},
     weighted,
-  };
-}
-
-/**
- * Replace the memory's verdict with the committee's, keeping everything the
- * memory measured about its own evidence.
- *
- * `support` and `maturity` deliberately still come from the memory. They
- * describe how much evidence exists at all — effective neighbour count and
- * store size — which the committee does not change and cannot improve on. Only
- * `margin` is recomputed, because that one is a property of the distribution
- * being predicted from, and that distribution is now the panel's.
- */
-export function applyCommittee(
-  memory: AggregateResult,
-  panel: { distribution: Record<Move, number>; contributions: Record<string, number> },
-  memorySize: number,
-): AggregateResult {
-  const margin = marginOf(panel.distribution);
-  const support = clamp(memory.effectiveN / SUPPORT_TARGET, 0, 1);
-  const maturity = clamp(memorySize / COLD_START_EPISODES, 0, 1);
-
-  return {
-    ...memory,
-    distribution: panel.distribution,
-    predictedHuman: argmax(panel.distribution),
-    margin,
-    confidence: margin * support * maturity,
-    contributions: panel.contributions,
   };
 }
 
@@ -298,7 +264,6 @@ export function decide(
     effectiveN,
     margin,
     priorWeight,
-    contributions,
     weighted,
   } = aggregateResult;
 
@@ -314,7 +279,6 @@ export function decide(
     effectiveN,
     margin,
     priorWeight,
-    contributions,
     topNeighbors: weighted.slice(0, topN),
     control,
   };
