@@ -8,8 +8,15 @@ export type Move = "rock" | "paper" | "scissors";
 /** A round result. Always documented from an explicitly named perspective. */
 export type Outcome = "win" | "loss" | "draw";
 
-/** How aggressively the AI exploits what it has learned. */
-export type Difficulty = "casual" | "rival" | "ruthless";
+/**
+ * What the AI is steering the SCORE toward. This is not a difficulty dial —
+ * the prediction runs at full strength in every mode. Only what the AI does
+ * with a correct read changes.
+ */
+export type Mode = "dominate" | "level" | "yield";
+
+/** What the AI is trying to make happen this round, given its read. */
+export type Intent = "win" | "draw" | "lose";
 
 /** `bootstrap` = still cold-starting, `adaptive` = predicting from memory. */
 export type AiMode = "bootstrap" | "adaptive";
@@ -50,23 +57,37 @@ export interface Recalled {
   influence: number;
 }
 
+/** Why the score controller chose the intent it did. */
+export interface ControlState {
+  /** Current AI score minus human score. */
+  error: number;
+  /** Accumulated error, so a persistent deficit eventually forces a correction. */
+  integral: number;
+  /**
+   * True when the controller has deliberately stopped steering — either the
+   * read is too weak to act on, or the player can see the AI's hand and
+   * steering would just escalate pointlessly.
+   */
+  frozen: boolean;
+  /** Short human-readable reason, shown in the UI. */
+  note: string;
+}
+
 /** Everything the AI worked out for one round, surfaced to the UI verbatim. */
 export interface Reasoning {
   mode: AiMode;
   /** The context string the AI actually embedded. Shown in the memory panel. */
   context: string;
-  /**
-   * The AI's actual best read — the highest-weighted human move. Null while
-   * bootstrapping. This is what "read rate" is scored against, whether or not
-   * the AI chose to act on it.
-   */
+  /** Which human move the AI expected. Null while bootstrapping. */
   predictedHuman: Move | null;
   /**
-   * The move the AI actually countered, sampled from the distribution. Differs
-   * from `predictedHuman` when sampling picked an underdog, and is null when
-   * the AI threw at random instead.
+   * The move the AI actually played against, sampled from the distribution.
+   * Differs from `predictedHuman` when sampling picked an underdog, and is
+   * null when the AI threw at random.
    */
   playedAgainst: Move | null;
+  /** What the AI was trying to make happen, given its read. */
+  intent: Intent;
   /** Normalised probability the AI assigned to each human move. */
   distribution: Record<Move, number>;
   /** Composite honest confidence in [0,1]. See `lib/predict.ts` for the formula. */
@@ -79,10 +100,12 @@ export interface Reasoning {
   effectiveN: number;
   /** How decisively the winning move beat the runner-up, in [0,1]. */
   margin: number;
-  /** True when the AI deliberately threw a random move instead of exploiting. */
+  /** True when the AI deliberately threw a random move instead of acting on its read. */
   explored: boolean;
   /** The closest episodes, for the "what the AI remembered" panel. */
   topNeighbors: Recalled[];
+  /** Present only for the score-steering modes. */
+  control: ControlState | null;
 }
 
 /** One completed round, as tracked by the client for history and stats. */
@@ -98,7 +121,30 @@ export interface RoundRecord {
   confidence: number;
   neighbors: number;
   mode: AiMode;
+  intent: Intent;
+  /** Whether the client recomputed the commitment hash and it matched. */
+  verified: boolean;
   ts: number;
+}
+
+/** What the AI committed to, revealed early because the player asked to see it. */
+export interface RevealPayload {
+  /** The move the AI has already locked in for this round. */
+  aiMove: Move;
+  reasoning: Reasoning;
+}
+
+/** Response body of `POST /api/commit`. */
+export interface CommitResponse {
+  commitId: string;
+  /** `sha256(aiMove + ":" + nonce)`. Verifiable after the round resolves. */
+  hash: string;
+  expiresAt: number;
+  round: number;
+  memorySize: number;
+  mode: Mode;
+  /** Populated only when the player has the reveal panel open. */
+  reveal: RevealPayload | null;
 }
 
 /** Response body of `POST /api/round`. */
@@ -111,6 +157,10 @@ export interface RoundResponse {
   /** Total episodes held in the vector store after this round was recorded. */
   memorySize: number;
   round: number;
+  /** The commitment being opened, so the client can verify it itself. */
+  commitId: string;
+  hash: string;
+  nonce: string;
 }
 
 /** Response body of `GET /api/status`. */
