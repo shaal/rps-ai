@@ -13,7 +13,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { OnnxEmbedder, VectorDB, getImplementationType } from "ruvector";
 
-import type { MemoryStore, StoreInfo } from "./memory-store";
+import type { ExportedEpisodes, MemoryStore, StoreInfo } from "./memory-store";
 import type { EpisodeMeta, Move, Recalled } from "./types";
 import { isMove } from "./rps";
 
@@ -22,6 +22,20 @@ const MODEL_ID = "all-MiniLM-L6-v2";
 
 /** Records which database file is currently live across restarts. */
 const POINTER_FILE = "memory-pointer.json";
+
+/**
+ * Append-only log of every episode, kept alongside the database.
+ *
+ * It exists because the vector index cannot be reliably enumerated: retrieval
+ * at `k = len()` returns everything for well-spread vectors but collapses on
+ * real game data, where episodes sit within ~0.003 cosine of each other. The
+ * log is therefore the authoritative source for exporting, and it is what makes
+ * a portable ~10KB export possible instead of a 1.6MB database dump.
+ */
+const EPISODE_LOG = "episodes.jsonl";
+
+/** Probes used for the one-off backfill of a missing log. */
+const BACKFILL_PROBES = ["reset probe", "H:R>P>S", "H:S>P>R st:R3 out:W,W,W"];
 
 /** Matches the rotated generations produced by `reset()`. */
 const GENERATION_PATTERN = /^rps-memory-\d+\.db$/;
@@ -85,16 +99,20 @@ export class RuVectorStore implements MemoryStore {
   private async doInit(): Promise<void> {
     const startedAt = Date.now();
 
-    // The native binding falls back to a silent no-op stub on an unsupported
-    // platform: insert() returns fake ids and search() always returns []. The
-    // AI would look like it was learning while being permanently blind, so
-    // refuse to start rather than serve a convincing fake.
+    // RuVector picks a backend by priority: native Rust, then RVF if
+    // `@ruvector/rvf` is installed, then a stub. The stub is the dangerous one
+    // — insert() returns fake ids and search() always returns [], so the AI
+    // would look like it was learning while being permanently blind.
+    //
+    // Only the stub is rejected. RVF is a real persistent store, and refusing
+    // it would mean refusing to start on any platform without a prebuilt Rust
+    // binary (Apple Silicon, Alpine, ARM) where the game would run fine.
     const implementation = safeImplementationType();
-    if (implementation !== "native") {
+    if (implementation !== "native" && implementation !== "rvf") {
       throw new Error(
-        `RuVector loaded its "${implementation}" implementation instead of the native engine. ` +
+        `RuVector loaded its "${implementation}" implementation, which is the testing stub. ` +
           `Vector search would silently return no results. ` +
-          `Check that the ruvector-core package for this platform installed correctly.`,
+          `Install a ruvector-core build for this platform, or @ruvector/rvf.`,
       );
     }
 
@@ -114,6 +132,7 @@ export class RuVectorStore implements MemoryStore {
 
     this.embedder = embedder;
     this.db = this.openDatabase(this.activeName);
+    await this.backfillLog();
     this.initMs = Date.now() - startedAt;
   }
 
@@ -200,10 +219,86 @@ export class RuVectorStore implements MemoryStore {
   async remember(context: string, meta: EpisodeMeta): Promise<string> {
     const { embedder, db } = await this.ready();
     const vector = await embedder.embed(context);
-    return db.insert({
+    const id = await db.insert({
       vector,
       metadata: { ...meta } as Record<string, unknown>,
     });
+
+    // Logged only after the insert succeeds, so the log never claims an episode
+    // the store does not hold. A crash in between loses one line from the log
+    // while the store keeps the episode — the safer direction to be wrong in.
+    this.appendEpisode(meta);
+    return id;
+  }
+
+  /** Append one episode to the portable log. Synchronous to keep order exact. */
+  private appendEpisode(meta: EpisodeMeta): void {
+    try {
+      fs.appendFileSync(this.logPath(), `${JSON.stringify(meta)}\n`);
+    } catch {
+      // The log is for export only; losing a line must never fail a round.
+    }
+  }
+
+  private logPath(): string {
+    return path.join(this.dataDir, EPISODE_LOG);
+  }
+
+  async exportEpisodes(): Promise<ExportedEpisodes> {
+    const storeSize = await this.size();
+
+    let jsonl = "";
+    try {
+      jsonl = fs.readFileSync(this.logPath(), "utf8");
+    } catch {
+      jsonl = "";
+    }
+
+    const count = jsonl.split("\n").filter((line) => line.trim().length > 0).length;
+    return { jsonl, count, storeSize, partial: count < storeSize };
+  }
+
+  /**
+   * Seed the log for a store that predates it.
+   *
+   * Best effort by nature: the only way to enumerate is to search, and search
+   * recall collapses on tightly clustered vectors. Several probes are tried and
+   * results deduplicated by id, but the result can still be short of the store,
+   * which `exportEpisodes` reports rather than hiding.
+   */
+  private async backfillLog(): Promise<void> {
+    if (fs.existsSync(this.logPath())) return;
+
+    const { embedder, db } = { embedder: this.embedder, db: this.db };
+    if (!embedder || !db) return;
+
+    const total = await db.len();
+    if (total === 0) {
+      fs.writeFileSync(this.logPath(), "");
+      return;
+    }
+
+    const seen = new Map<string, EpisodeMeta>();
+    for (const probe of BACKFILL_PROBES) {
+      try {
+        const vector = await embedder.embed(probe);
+        const hits = (await db.search({ vector, k: total })) as unknown as SearchHit[];
+        for (const hit of hits) {
+          if (seen.has(hit.id)) continue;
+          const meta = parseEpisodeMeta(hit.metadata);
+          if (meta) seen.set(hit.id, meta);
+        }
+      } catch {
+        // Probe failed; the remaining probes may still recover episodes.
+      }
+      if (seen.size >= total) break;
+    }
+
+    const ordered = [...seen.values()].sort((a, b) => a.seq - b.seq);
+    fs.writeFileSync(
+      this.logPath(),
+      ordered.map((meta) => JSON.stringify(meta)).join("\n") + (ordered.length ? "\n" : ""),
+    );
   }
 
   async recall(context: string, k: number): Promise<Omit<Recalled, "influence">[]> {
@@ -279,6 +374,13 @@ export class RuVectorStore implements MemoryStore {
     this.db = next;
     this.activeName = nextName;
     this.writePointer(nextName);
+
+    // The log mirrors the store, so wiping one wipes the other.
+    try {
+      fs.writeFileSync(this.logPath(), "");
+    } catch {
+      // Non-fatal: a stale log would only make the next export look too long.
+    }
 
     if (previousName !== nextName) {
       fs.rmSync(path.join(this.dataDir, previousName), { force: true });

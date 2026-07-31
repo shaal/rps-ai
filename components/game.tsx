@@ -489,6 +489,7 @@ function Header({
         <a
           href="/api/export"
           download
+          title="Download every episode as newline-delimited JSON — about 200 bytes each"
           className="readout rounded-lg border border-line px-3 py-2 text-[11px] tracking-wide text-faint uppercase transition-colors hover:border-line-lit hover:text-dim"
         >
           Export memory

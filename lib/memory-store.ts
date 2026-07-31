@@ -11,6 +11,21 @@
 
 import type { EpisodeMeta, Recalled } from "./types";
 
+export interface ExportedEpisodes {
+  /** Newline-delimited JSON, one `EpisodeMeta` per line. */
+  jsonl: string;
+  /** Lines actually written out. */
+  count: number;
+  /** Episodes the vector store reports holding. */
+  storeSize: number;
+  /**
+   * True when `count` is short of `storeSize` — episodes recorded before the
+   * log existed cannot be recovered, because this index cannot be reliably
+   * enumerated once its vectors cluster tightly.
+   */
+  partial: boolean;
+}
+
 export interface StoreInfo {
   /** `native` when the real vector engine is live. Anything else is degraded. */
   implementation: string;
@@ -41,6 +56,16 @@ export interface MemoryStore {
 
   /** Wipe all learned memory and start from an empty store. */
   reset(): Promise<void>;
+
+  /**
+   * Every episode as newline-delimited JSON, oldest first.
+   *
+   * This is the portable form of the memory. The vectors are deliberately
+   * absent: they are deterministic re-embeddings of `context`, so the metadata
+   * alone is enough to rebuild the store on any backend — which is also why it
+   * is about 150x smaller than the raw database file.
+   */
+  exportEpisodes(): Promise<ExportedEpisodes>;
 
   /** Absolute path to the persisted database file, or null if not file-backed. */
   filePath(): string | null;
