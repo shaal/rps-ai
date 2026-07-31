@@ -135,11 +135,13 @@ export interface RevealPayload {
 }
 
 /**
- * Response body of `POST /api/commit`. Always hash-only.
+ * What `commitRound` hands back. Hash-only, deliberately.
  *
- * Disclosure happens through `POST /api/peek`, which reads the same sealed
- * commitment rather than minting a new one — so switching to Foresight can
- * never re-roll the AI's move or invalidate a hash already shown.
+ * Disclosure goes through `peekRound`, which reads the same sealed commitment
+ * rather than minting a new one — so switching to Foresight can never re-roll
+ * the AI's move or invalidate a hash already on screen. These were HTTP
+ * response bodies when the engine ran on a server; they are plain return types
+ * now, and the shapes were worth keeping intact.
  */
 export interface CommitResponse {
   commitId: string;
@@ -151,21 +153,21 @@ export interface CommitResponse {
   mode: Mode;
 }
 
-/** Response body of `POST /api/peek`. */
+/** What `peekRound` hands back. */
 export interface PeekResponse extends RevealPayload {
   /** Echoed so the client can tell which commitment this disclosure describes. */
   commitId: string;
   round: number;
 }
 
-/** Response body of `POST /api/round`. */
+/** What `resolveRound` hands back. */
 export interface RoundResponse {
   humanMove: Move;
   aiMove: Move;
   /** From the human's perspective. */
   outcome: Outcome;
   reasoning: Reasoning;
-  /** Total episodes held in the vector store after this round was recorded. */
+  /** Total episodes held in memory after this round was recorded. */
   memorySize: number;
   round: number;
   /** The commitment being opened, so the client can verify it itself. */
@@ -174,7 +176,7 @@ export interface RoundResponse {
   nonce: string;
 }
 
-/** Response body of `GET /api/status`. */
+/** What `getStatus` hands back. */
 export interface StatusResponse {
   ready: boolean;
   warming: boolean;

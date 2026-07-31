@@ -56,9 +56,13 @@ export function Telemetry({
               number.
             </p>
             <p>
-              Beating it is easier than it looks: play the move that beats what it expects.
-              Flip the instrument to <strong>Foresight</strong> and it will show you its
-              sealed move before you throw.
+              <strong>Read rate is not the score.</strong> In Dominate a good read usually
+              becomes a win — but in Level or Yield the AI may draw or lose the round on
+              purpose, so you can be well ahead on points while it still reads you accurately.
+            </p>
+            <p>
+              Want an easy win? Flip the instrument to <strong>Foresight</strong>. It shows
+              the sealed move before you throw, and looking does not change it.
             </p>
           </Explainer>
         </div>

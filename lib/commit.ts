@@ -5,16 +5,18 @@
  * `sha256(move + ":" + nonce)`. After the throw it reveals the move and the
  * nonce, and the client recomputes the hash for itself.
  *
- * What that proves, precisely: the move the AI reveals is the one it had
- * already chosen when it handed over the hash — it cannot have been swapped
- * after seeing the human's throw. It does NOT prove the server is honest in
- * general; a rigged server could always have committed to a rigged move in the
- * first place. The UI is worded accordingly.
+ * What that proves, and it is now weaker than it was: the move revealed is the
+ * one already chosen when the hash was handed over, so it cannot have been
+ * swapped after seeing the throw. But the seal and the check both happen in
+ * the same browser since this stopped being a server game, which makes it a
+ * demonstration of commit-reveal rather than a guarantee against anyone —
+ * whoever can edit the page can edit both halves. The explainer panel says so
+ * in as many words; presenting it as proof would be dishonest.
+ *
+ * The sequencing it enforces is real regardless, and that is what the game
+ * actually needs: the move exists before the throw, and looking at it through
+ * Foresight does not re-roll it.
  */
-
-import "server-only";
-
-import crypto from "node:crypto";
 
 import type { Intent, Move, Reasoning } from "./types";
 
@@ -76,12 +78,21 @@ function sessions(): Map<string, SessionState> {
   return globalForCommits.__rpsSessions;
 }
 
-export function commitmentHash(move: Move, nonce: string): string {
-  return crypto.createHash("sha256").update(`${move}:${nonce}`).digest("hex");
+const hex = (bytes: Uint8Array) =>
+  [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+
+/**
+ * Async because Web Crypto is. The Node build hashed synchronously, but
+ * `crypto.subtle` is the only SHA-256 a browser offers without shipping an
+ * implementation, and the one caller was already in an async function.
+ */
+export async function commitmentHash(move: Move, nonce: string): Promise<string> {
+  const bytes = new TextEncoder().encode(`${move}:${nonce}`);
+  return hex(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)));
 }
 
 export function newNonce(): string {
-  return crypto.randomBytes(16).toString("hex");
+  return hex(crypto.getRandomValues(new Uint8Array(16)));
 }
 
 export function newId(): string {

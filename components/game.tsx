@@ -2,11 +2,21 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 
+import {
+  CommitmentError,
+  commitRound,
+  exportEpisodes,
+  getStatus,
+  peekRound,
+  resetMemory as resetStore,
+  resolveRound,
+  warmup,
+} from "@/lib/engine";
 import { Explainer } from "./explainer";
 import { InstrumentPanel, type View } from "./instrument-panel";
 import { MOVE_HEX, MOVE_LABEL, MoveGlyph } from "./move-glyph";
 import { Telemetry } from "./telemetry";
-import { BOOTSTRAP_ROUNDS } from "@/lib/config";
+import { MIN_MEMORY_FOR_ADAPTIVE, RECALL_K } from "@/lib/config";
 import { MODE_PROFILES } from "@/lib/predict";
 import { MOVES } from "@/lib/rps";
 import type {
@@ -155,8 +165,8 @@ export function Game() {
 
     const poll = async () => {
       try {
-        const response = await fetch("/api/status", { cache: "no-store" });
-        const data = (await response.json()) as StatusResponse;
+        warmup();
+        const data = await getStatus();
         if (cancelled) return;
         setStatus(data);
         if (!data.ready && !data.error) timer = setTimeout(poll, 900);
@@ -187,25 +197,19 @@ export function Game() {
 
     const load = async () => {
       try {
-        const response = await fetch("/api/commit", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            sessionId: getSessionId(),
-            mode,
-            revealed: viewRef.current === "foresight",
-            round: history.length + 1,
-            history: history.map((round) => ({
-              humanMove: round.humanMove,
-              aiMove: round.aiMove,
-              outcome: round.outcome,
-            })),
-          }),
+        const data = await commitRound({
+          sessionId: getSessionId(),
+          mode,
+          revealed: viewRef.current === "foresight",
+          round: history.length + 1,
+          history: history.map((round) => ({
+            humanMove: round.humanMove,
+            aiMove: round.aiMove,
+            outcome: round.outcome,
+          })),
         });
-        const data = await response.json();
         if (cancelled) return;
-        if (!response.ok) throw new Error(data?.error ?? "The AI could not lock in a move.");
-        setCommit(data as CommitResponse);
+        setCommit(data);
         setError(null);
       } catch (caught) {
         if (cancelled) return;
@@ -233,14 +237,12 @@ export function Game() {
 
     const load = async () => {
       try {
-        const response = await fetch("/api/peek", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ sessionId: getSessionId(), commitId: commit.commitId }),
+        const data = await peekRound({
+          sessionId: getSessionId(),
+          commitId: commit.commitId,
         });
-        const data = await response.json();
-        if (cancelled || !response.ok) return;
-        setPeek(data as PeekResponse);
+        if (cancelled) return;
+        setPeek(data);
       } catch {
         // A stale commitment resolves itself: the commit effect fetches a new
         // one and this runs again against it.
@@ -263,35 +265,29 @@ export function Game() {
       setNotice(null);
 
       try {
-        const [response] = await Promise.all([
-          fetch("/api/round", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-            sessionId: getSessionId(),
-            commitId: commit.commitId,
-            humanMove: move,
-          }),
-          }),
-          wait(REVEAL_BEAT_MS),
-        ]);
-
-        const data = await response.json();
-
-        if (response.status === 409) {
-          // The commitment went stale (expired, superseded, or the memory was
-          // reset underneath it). Recoverable — take a fresh one and let the
-          // player throw again.
-          setNotice(
-            `${data?.error ?? "That move expired."} A new one is locking in — throw again.`,
-          );
-          setCommit(null);
-          setCommitNonce((n) => n + 1);
-          return;
+        let result: RoundResponse;
+        try {
+          [result] = await Promise.all([
+            resolveRound({
+              sessionId: getSessionId(),
+              commitId: commit.commitId,
+              humanMove: move,
+            }),
+            wait(REVEAL_BEAT_MS),
+          ]);
+        } catch (caught) {
+          if (caught instanceof CommitmentError) {
+            // The commitment went stale (expired, superseded, or the memory was
+            // reset underneath it). Recoverable — take a fresh one and let the
+            // player throw again. This used to arrive as an HTTP 409.
+            setNotice(`${caught.message} A new one is locking in — throw again.`);
+            setCommit(null);
+            setCommitNonce((n) => n + 1);
+            return;
+          }
+          throw caught;
         }
-        if (!response.ok) throw new Error(data?.error ?? "The round could not be played.");
 
-        const result = data as RoundResponse;
         const { reasoning } = result;
 
         setVerification(await verifyCommitment(result));
@@ -358,10 +354,8 @@ export function Game() {
     setResetting(true);
     setError(null);
     try {
-      const response = await fetch("/api/reset", { method: "POST" });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data?.error ?? "The memory could not be erased.");
-      setStatus(data as StatusResponse);
+      await resetStore();
+      setStatus(await getStatus());
       setHistory([]);
       setLast(null);
       setCommit(null);
@@ -385,8 +379,17 @@ export function Game() {
     return { you, ai };
   }, [history]);
 
-  const adaptive = (last?.reasoning.mode ?? "bootstrap") === "adaptive";
-  const roundsToAdaptive = Math.max(0, BOOTSTRAP_ROUNDS - history.length);
+  /**
+   * Before the first throw of a visit there is no round to describe, so fall
+   * back to the gate itself. Reading it purely from the last round meant a
+   * returning player with a full memory was labelled as still learning, right
+   * up until the throw that proved otherwise.
+   */
+  const adaptive = last
+    ? last.reasoning.mode === "adaptive"
+    : (status?.memorySize ?? 0) >= MIN_MEMORY_FOR_ADAPTIVE;
+  /** The other half of the gate in `think()`, which the badge used to ignore. */
+  const memoriesNeeded = Math.max(0, MIN_MEMORY_FOR_ADAPTIVE - (status?.memorySize ?? 0));
 
   /**
    * One sentence per round, for anyone who is not watching the cards.
@@ -465,7 +468,7 @@ export function Game() {
           <Controls
             status={status}
             adaptive={adaptive}
-            roundsToAdaptive={roundsToAdaptive}
+            memoriesNeeded={memoriesNeeded}
             mode={mode}
             onMode={setMode}
             confirmingReset={confirmingReset}
@@ -537,7 +540,7 @@ function Header() {
 function Controls({
   status,
   adaptive,
-  roundsToAdaptive,
+  memoriesNeeded,
   mode,
   onMode,
   confirmingReset,
@@ -551,7 +554,7 @@ function Controls({
 }: {
   status: StatusResponse | null;
   adaptive: boolean;
-  roundsToAdaptive: number;
+  memoriesNeeded: number;
   mode: Mode;
   onMode: (value: Mode) => void;
   confirmingReset: boolean;
@@ -586,10 +589,46 @@ function Controls({
           It locks in its move before you throw, then stores the round. The longer
           you play, the better it reads you.
         </p>
-        <ModeBadge status={status} adaptive={adaptive} roundsToAdaptive={roundsToAdaptive} />
+        <ModeBadge
+          status={status}
+          adaptive={adaptive}
+          memoriesNeeded={memoriesNeeded}
+        />
       </div>
 
       <div className="flex flex-wrap items-center gap-2">
+        {/* The modes are the one place the game can act against its own read —
+            Level and Yield throw rounds on purpose. Nothing on screen said so,
+            which is the sort of thing that feels like a cheat once you find it
+            out for yourself. */}
+        <Explainer
+          label="What the three modes change about the AI's play"
+          title="What the modes do"
+        >
+          <p>
+            These change what the AI <strong>does with a read</strong>, not how hard it tries
+            to read you. The prediction runs at full strength in all three.
+          </p>
+          <p>
+            <strong>Dominate</strong> — plays the move that beats what it expects. No
+            handicap.
+          </p>
+          <p>
+            <strong>Level</strong> — steers toward a tied score. When it is ahead it will
+            draw or <strong>lose rounds on purpose</strong> to let you back in. Open Foresight
+            and it stops steering rather than escalate against someone who can see its hand.
+          </p>
+          <p>
+            <strong>Yield</strong> — once its read is strong enough, it deliberately plays the
+            move yours beats. The better it knows you, the more easily you win. On a weak read
+            it holds instead, rather than throwing at random into a loss.
+          </p>
+          <p>
+            So Dominate is a match, Level is a sparring partner, and Yield is an opponent
+            that folds as soon as it is sure.
+          </p>
+        </Explainer>
+
         <div
           className="flex rounded-lg border border-line-control p-1"
           role="group"
@@ -631,14 +670,26 @@ function Controls({
           <span className="sr-only"> — single-key throw shortcuts R, P and S</span>
         </button>
 
-        <a
-          href="/api/export"
-          download
+        {/* No server to download from any more — the file is built from the
+            store and handed to the browser as a blob. */}
+        <button
+          type="button"
+          onClick={async () => {
+            const { jsonl, count } = await exportEpisodes();
+            const url = URL.createObjectURL(
+              new Blob([jsonl], { type: "application/x-ndjson" }),
+            );
+            const link = document.createElement("a");
+            link.href = url;
+            link.download = `rps-memory-${count}-episodes.jsonl`;
+            link.click();
+            URL.revokeObjectURL(url);
+          }}
           title="Download every episode as newline-delimited JSON — about 200 bytes each"
           className="readout rounded-lg border border-line-control px-3 py-2 text-[0.75rem] tracking-wide text-faint uppercase transition-colors hover:border-line-lit hover:text-dim"
         >
           Export memory
-        </a>
+        </button>
 
         {confirmingReset ? (
           <div className="flex items-center gap-2">
@@ -679,20 +730,28 @@ function Controls({
   );
 }
 
+/**
+ * Reports the one gate that remains: how full this browser's memory is.
+ *
+ * It used to also count down rounds in the current visit, which is why a
+ * returning player with a full memory was told they were "bootstrapping" — the
+ * countdown was real, the implication that nothing had been learned was not.
+ * That gate is gone; see the note in `think()`.
+ */
 function ModeBadge({
   status,
   adaptive,
-  roundsToAdaptive,
+  memoriesNeeded,
 }: {
   status: StatusResponse | null;
   adaptive: boolean;
-  roundsToAdaptive: number;
+  memoriesNeeded: number;
 }) {
   if (!status || status.warming) {
     return (
       <Badge hex="#ffb454" pulsing>
-        <span>Loading model</span>
-        <span className="text-faint">first run downloads ~23MB</span>
+        <span>Starting up</span>
+        <span className="text-faint">opening this browser&apos;s memory</span>
       </Badge>
     );
   }
@@ -709,11 +768,11 @@ function ModeBadge({
   if (!adaptive) {
     return (
       <Badge hex="#ffb454">
-        <span>Bootstrapping</span>
+        <span>Learning you</span>
         <span className="text-faint">
-          {roundsToAdaptive > 0
-            ? `${roundsToAdaptive} more round${roundsToAdaptive === 1 ? "" : "s"} of blind play`
-            : "building its first memories"}
+          {memoriesNeeded > 0
+            ? `throwing blind for ${memoriesNeeded} more round${memoriesNeeded === 1 ? "" : "s"}`
+            : "ready — it reads you from the next throw"}
         </span>
       </Badge>
     );
@@ -722,7 +781,9 @@ function ModeBadge({
   return (
     <Badge hex="#2fe0cf">
       <span>Adaptive</span>
-      <span className="text-faint">{status.memorySize} memories in play</span>
+      <span className="text-faint">
+        {status.memorySize} memor{status.memorySize === 1 ? "y" : "ies"} in this browser
+      </span>
     </Badge>
   );
 }
@@ -863,21 +924,24 @@ function SealExplainer({
   const pendingHash = commit?.hash;
 
   return (
-    <Explainer label="How the AI is stopped from changing its move" title="Why it can't cheat">
+    <Explainer label="What the locked move means, and what it does not" title="Why the move is locked">
       <p>
-        The AI picks its move <strong>before</strong> you throw, then publishes a fingerprint
-        of that choice — the string of letters and numbers below. Think of it as sealing an
-        answer in an envelope and letting you photograph the envelope.
+        Before you throw, the AI has already picked its move. It turns that pick into a
+        fingerprint — the string of letters and numbers below — and shows it to you first.
       </p>
       <p>
-        When the round resolves it opens the envelope. Your browser takes the revealed move,
-        works out the fingerprint again from scratch, and compares. Change the move by a
-        single letter and the fingerprint comes out completely different — so it cannot
-        quietly swap its throw once it has seen yours.
+        After the round, this page opens the move, rebuilds the fingerprint from scratch and
+        checks the two match. Changing the move by a single letter would scramble the
+        fingerprint completely. The ✓ or ✗ below is that check, run just now.
       </p>
       <p>
-        What this does <strong>not</strong> prove is that the sealed choice was a fair one. It
-        only proves the choice did not change.
+        <strong>What this shows:</strong> the sealed choice did not change after you threw.
+      </p>
+      <p>
+        <strong>What it does not show:</strong> that the choice was a fair one. There is no
+        referee — since this game stopped using a server, the opponent and the checker are
+        both this browser, and anyone who can edit the page can edit both. Treat it as a
+        working demonstration of commit-and-reveal, not as a guarantee.
       </p>
 
       <p className="readout mt-3 border-t border-line pt-3">
@@ -1169,25 +1233,28 @@ function Footer({ status }: { status: StatusResponse | null }) {
       <span className="eyebrow">Runs entirely on this machine</span>
       <Explainer label="What is running behind the game" title="What's running">
         <p>
-          Nothing leaves this computer. There is no account, no server in the cloud, and no
-          round is sent anywhere — the opponent, its memory and its maths all run here.
+          Everything runs in this browser. No account, no server opponent, no round leaves
+          the machine — the AI, its memory and the fingerprint check all happen here.
         </p>
         <p>
-          Turning each note about a round into numbers is done by a small open model called{" "}
-          <strong>{status.model}</strong>. It converts a note into {status.dimensions} numbers,
-          and how alike two notes are is measured as the angle between those two lists —
-          closer angle, more similar situation.
+          <strong>Memory persists.</strong> Episodes are kept in this browser&apos;s own
+          storage and are still here when you come back, until you press{" "}
+          <strong>Reset AI memory</strong> or clear site data. It is per browser, so a
+          different browser, or someone else on this machine, meets a blank opponent.{" "}
+          <strong>Export memory</strong> downloads every round as plain text.
         </p>
         <p>
-          Memories are kept in a database file on disk. <strong>Export memory</strong> hands
-          you every round as plain text, and <strong>Reset AI memory</strong> erases the lot
-          and puts the opponent back to knowing nothing about you.
+          <strong>The read is not a language model.</strong> A small hand-written encoder
+          turns each situation code into {status.dimensions} numbers, and the search is an
+          exact comparison against every stored episode — up to {RECALL_K} nearest, then a
+          weighted vote on what you played next.
         </p>
-        <p className="readout mt-3 border-t border-line pt-3">
-          {status.implementation} engine
-          {status.initMs !== null ? ` · started in ${status.initMs}ms` : ""}
+        <p>
+          <strong>The throw is not always the read.</strong> On a brand-new browser it is
+          random until the memory fills. After that it usually counters its top read, but it
+          deliberately samples a runner-up now and then so it cannot be reverse-engineered —
+          and the mode can override the whole thing and aim for a draw or a loss.
         </p>
-        <p className="readout">{status.storagePath}</p>
       </Explainer>
     </footer>
   );
