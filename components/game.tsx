@@ -4,12 +4,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { MemoryPanel } from "./memory-panel";
 import { MOVE_HEX, MOVE_LABEL, MoveGlyph } from "./move-glyph";
+import { RevealPanel } from "./reveal-panel";
 import { Telemetry } from "./telemetry";
 import { BOOTSTRAP_ROUNDS } from "@/lib/config";
-import { DIFFICULTY_PROFILES } from "@/lib/predict";
+import { MODE_PROFILES } from "@/lib/predict";
 import { MOVES } from "@/lib/rps";
 import type {
-  Difficulty,
+  CommitResponse,
+  Mode,
   Move,
   Outcome,
   RoundRecord,
@@ -17,16 +19,16 @@ import type {
   StatusResponse,
 } from "@/lib/types";
 
-/** Floor on the "thinking" beat so the search always reads as deliberate. */
-const MIN_THINK_MS = 620;
+/**
+ * Short beat so the reveal reads as an event rather than a flicker. The AI is
+ * not thinking here — it committed before the throw — so this is presentation
+ * only and deliberately brief.
+ */
+const REVEAL_BEAT_MS = 220;
 
-const KEY_TO_MOVE: Record<string, Move> = {
-  r: "rock",
-  p: "paper",
-  s: "scissors",
-};
+const KEY_TO_MOVE: Record<string, Move> = { r: "rock", p: "paper", s: "scissors" };
 
-const DIFFICULTIES: Difficulty[] = ["casual", "rival", "ruthless"];
+const MODES: Mode[] = ["dominate", "level", "yield"];
 
 const VERDICT: Record<Outcome, { label: string; hex: string }> = {
   win: { label: "You win", hex: "#3ddc97" },
@@ -34,24 +36,55 @@ const VERDICT: Record<Outcome, { label: string; hex: string }> = {
   draw: { label: "Draw", hex: "#7b8ea3" },
 };
 
+type Verification = "idle" | "ok" | "failed" | "unavailable";
+
 export function Game() {
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [history, setHistory] = useState<RoundRecord[]>([]);
   const [last, setLast] = useState<RoundResponse | null>(null);
-  const [thinking, setThinking] = useState(false);
-  const [difficulty, setDifficulty] = useState<Difficulty>("rival");
+  const [commit, setCommit] = useState<CommitResponse | null>(null);
+  const [resolving, setResolving] = useState(false);
+  const [mode, setMode] = useState<Mode>("dominate");
+  const [reveal, setReveal] = useState(false);
+  const [verification, setVerification] = useState<Verification>("idle");
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [confirmingReset, setConfirmingReset] = useState(false);
   const [resetting, setResetting] = useState(false);
+  /** Bumped to force a new commitment when history alone has not changed. */
+  const [commitNonce, setCommitNonce] = useState(0);
 
   const ready = Boolean(status?.ready);
 
-  /**
-   * Synchronous in-flight latch. `thinking` drives the UI, but a state update
-   * is async — two clicks landing in the same tick would both pass a state
-   * check and play two rounds off one intent.
-   */
+  /** No commitment in hand means one is on its way. */
+  const committing = ready && commit === null;
+
+  /** Synchronous latch — React state updates are async and two clicks can race. */
   const inFlight = useRef(false);
+  const sessionIdRef = useRef<string | null>(null);
+
+  /**
+   * One stable session id per browser, so the server can supersede stale
+   * commitments and keep controller state per player.
+   *
+   * Read lazily from inside callbacks rather than in an effect: it never needs
+   * to trigger a render, and touching localStorage during render would break
+   * server rendering.
+   */
+  const getSessionId = useCallback((): string => {
+    if (sessionIdRef.current) return sessionIdRef.current;
+    const KEY = "rps-session-id";
+    let existing = window.localStorage.getItem(KEY);
+    if (!existing) {
+      existing =
+        typeof crypto !== "undefined" && "randomUUID" in crypto
+          ? crypto.randomUUID()
+          : `s-${Date.now()}-${Math.floor(Math.random() * 1e9)}`;
+      window.localStorage.setItem(KEY, existing);
+    }
+    sessionIdRef.current = existing;
+    return existing;
+  }, []);
 
   // Poll until the embedder is up. The first ever run downloads the model, so
   // this can take a while and the UI says so rather than looking hung.
@@ -78,43 +111,95 @@ export function Game() {
     };
   }, []);
 
+  /**
+   * Fetch a fresh commitment whenever anything it depends on changes: the
+   * engine coming up, a completed round, a mode switch, or the reveal panel
+   * opening (which changes whether the plaintext move is sent at all).
+   *
+   * The cancellation guard matters: toggling mode and reveal quickly fires
+   * overlapping requests, and without it a slower earlier response could land
+   * last and leave a commitment that does not match the current settings.
+   */
+  useEffect(() => {
+    if (!ready) return;
+    let cancelled = false;
+
+    const load = async () => {
+      try {
+        const response = await fetch("/api/commit", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            sessionId: getSessionId(),
+            mode,
+            revealed: reveal,
+            round: history.length + 1,
+            history: history.map((round) => ({
+              humanMove: round.humanMove,
+              aiMove: round.aiMove,
+              outcome: round.outcome,
+            })),
+          }),
+        });
+        const data = await response.json();
+        if (cancelled) return;
+        if (!response.ok) throw new Error(data?.error ?? "The AI could not lock in a move.");
+        setCommit(data as CommitResponse);
+        setError(null);
+      } catch (caught) {
+        if (cancelled) return;
+        setError(caught instanceof Error ? caught.message : "Could not reach the AI.");
+      }
+    };
+
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, [ready, mode, reveal, history, commitNonce, getSessionId]);
+
   const play = useCallback(
     async (move: Move) => {
-      if (inFlight.current || !ready || resetting) return;
+      if (inFlight.current || !ready || resetting || !commit) return;
 
       inFlight.current = true;
-      setThinking(true);
+      setResolving(true);
       setError(null);
-
-      const payload = {
-        humanMove: move,
-        difficulty,
-        round: history.length + 1,
-        history: history.map((round) => ({
-          humanMove: round.humanMove,
-          aiMove: round.aiMove,
-          outcome: round.outcome,
-        })),
-      };
+      setNotice(null);
 
       try {
         const [response] = await Promise.all([
           fetch("/api/round", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
+            body: JSON.stringify({
+            sessionId: getSessionId(),
+            commitId: commit.commitId,
+            humanMove: move,
           }),
-          wait(MIN_THINK_MS),
+          }),
+          wait(REVEAL_BEAT_MS),
         ]);
 
         const data = await response.json();
-        if (!response.ok) {
-          throw new Error(data?.error ?? "The round could not be played.");
+
+        if (response.status === 409) {
+          // The commitment went stale (expired, superseded, or the memory was
+          // reset underneath it). Recoverable — take a fresh one and let the
+          // player throw again.
+          setNotice(
+            `${data?.error ?? "That move expired."} A new one is locking in — throw again.`,
+          );
+          setCommit(null);
+          setCommitNonce((n) => n + 1);
+          return;
         }
+        if (!response.ok) throw new Error(data?.error ?? "The round could not be played.");
 
         const result = data as RoundResponse;
         const { reasoning } = result;
 
+        setVerification(await verifyCommitment(result));
         setLast(result);
         setHistory((previous) => [
           ...previous,
@@ -124,7 +209,6 @@ export function Game() {
             aiMove: result.aiMove,
             outcome: result.outcome,
             predictedHuman: reasoning.predictedHuman,
-            // Only a real read can be scored. Bootstrap throws are not guesses.
             predictionCorrect:
               reasoning.mode === "adaptive" && reasoning.predictedHuman
                 ? reasoning.predictedHuman === result.humanMove
@@ -132,23 +216,27 @@ export function Game() {
             confidence: reasoning.confidence,
             neighbors: reasoning.neighbors,
             mode: reasoning.mode,
+            intent: reasoning.intent,
+            verified: true,
             ts: Date.now(),
           },
         ]);
         setStatus((previous) =>
           previous ? { ...previous, memorySize: result.memorySize } : previous,
         );
+        // Drop the spent commitment. The history change re-runs the commit
+        // effect, which locks in the next move straight away.
+        setCommit(null);
       } catch (caught) {
         setError(caught instanceof Error ? caught.message : "Something went wrong.");
       } finally {
         inFlight.current = false;
-        setThinking(false);
+        setResolving(false);
       }
     },
-    [ready, resetting, difficulty, history],
+    [ready, resetting, commit, getSessionId],
   );
 
-  // Keyboard throws.
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.metaKey || event.ctrlKey || event.altKey) return;
@@ -175,6 +263,9 @@ export function Game() {
       setStatus(data as StatusResponse);
       setHistory([]);
       setLast(null);
+      setCommit(null);
+      setVerification("idle");
+      setCommitNonce((n) => n + 1);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Reset failed.");
     } finally {
@@ -202,22 +293,24 @@ export function Game() {
         status={status}
         adaptive={adaptive}
         roundsToAdaptive={roundsToAdaptive}
-        difficulty={difficulty}
-        onDifficulty={setDifficulty}
+        mode={mode}
+        onMode={setMode}
         confirmingReset={confirmingReset}
         onRequestReset={() => setConfirmingReset(true)}
         onCancelReset={() => setConfirmingReset(false)}
         onConfirmReset={resetMemory}
         resetting={resetting}
-        busy={thinking}
+        busy={resolving}
       />
 
       {error && (
-        <p
-          role="alert"
-          className="panel border-loss/40 bg-loss/5 px-4 py-3 text-sm text-loss"
-        >
+        <p role="alert" className="panel border-loss/40 bg-loss/5 px-4 py-3 text-sm text-loss">
           {error}
+        </p>
+      )}
+      {notice && !error && (
+        <p role="status" className="panel border-warn/40 bg-warn/5 px-4 py-3 text-sm text-warn">
+          {notice}
         </p>
       )}
 
@@ -225,18 +318,31 @@ export function Game() {
         <div className="flex flex-col gap-5">
           <Stage
             last={last}
-            thinking={thinking}
+            resolving={resolving}
             score={score}
             ready={ready}
             warming={Boolean(status?.warming)}
+            commit={commit}
+            committing={committing}
+            verification={verification}
           />
 
-          <ThrowRow onPlay={play} disabled={!ready || thinking || resetting} />
+          <RevealPanel
+            open={reveal}
+            onToggle={() => setReveal((open) => !open)}
+            commit={commit}
+            committing={committing}
+          />
+
+          <ThrowRow
+            onPlay={play}
+            disabled={!ready || resolving || resetting || !commit}
+          />
 
           <Telemetry history={history} memorySize={status?.memorySize ?? 0} />
         </div>
 
-        <MemoryPanel reasoning={last?.reasoning ?? null} scanning={thinking} />
+        <MemoryPanel reasoning={last?.reasoning ?? null} scanning={resolving} />
       </main>
 
       <Footer status={status} />
@@ -246,14 +352,29 @@ export function Game() {
   );
 }
 
+/** Recompute the commitment hash in the browser and compare. */
+async function verifyCommitment(result: RoundResponse): Promise<Verification> {
+  if (typeof crypto === "undefined" || !crypto.subtle) return "unavailable";
+  try {
+    const bytes = new TextEncoder().encode(`${result.aiMove}:${result.nonce}`);
+    const digest = await crypto.subtle.digest("SHA-256", bytes);
+    const hex = [...new Uint8Array(digest)]
+      .map((byte) => byte.toString(16).padStart(2, "0"))
+      .join("");
+    return hex === result.hash ? "ok" : "failed";
+  } catch {
+    return "unavailable";
+  }
+}
+
 /* ------------------------------------------------------------------ header */
 
 function Header({
   status,
   adaptive,
   roundsToAdaptive,
-  difficulty,
-  onDifficulty,
+  mode,
+  onMode,
   confirmingReset,
   onRequestReset,
   onCancelReset,
@@ -264,8 +385,8 @@ function Header({
   status: StatusResponse | null;
   adaptive: boolean;
   roundsToAdaptive: number;
-  difficulty: Difficulty;
-  onDifficulty: (value: Difficulty) => void;
+  mode: Mode;
+  onMode: (value: Mode) => void;
   confirmingReset: boolean;
   onRequestReset: () => void;
   onCancelReset: () => void;
@@ -281,37 +402,35 @@ function Header({
             Adaptive <span className="text-scissors">RPS</span>
           </h1>
           <p className="mt-1.5 text-sm text-dim">
-            Every round you play is embedded and stored. The longer you play, the
-            better it reads you.
+            It locks in its move before you throw, then stores the round. The longer
+            you play, the better it reads you.
           </p>
         </div>
         <ModeBadge status={status} adaptive={adaptive} roundsToAdaptive={roundsToAdaptive} />
       </div>
 
       <div className="flex flex-wrap items-center gap-2">
-        <div
-          className="flex rounded-lg border border-line p-1"
-          role="group"
-          aria-label="Difficulty"
-        >
-          {DIFFICULTIES.map((level) => {
-            const active = difficulty === level;
+        <div className="flex rounded-lg border border-line p-1" role="group" aria-label="What the AI plays for">
+          {MODES.map((level) => {
+            const active = mode === level;
             return (
               <button
                 key={level}
                 type="button"
-                onClick={() => onDifficulty(level)}
-                title={DIFFICULTY_PROFILES[level].blurb}
+                onClick={() => onMode(level)}
+                title={MODE_PROFILES[level].blurb}
                 aria-pressed={active}
                 className={`readout rounded-md px-3 py-1.5 text-[11px] tracking-wide uppercase transition-colors ${
                   active ? "bg-scissors/15 text-scissors" : "text-faint hover:text-dim"
                 }`}
               >
-                {DIFFICULTY_PROFILES[level].label}
+                {MODE_PROFILES[level].label}
               </button>
             );
           })}
         </div>
+
+        <p className="hidden text-[11px] text-faint sm:block">{MODE_PROFILES[mode].blurb}</p>
 
         <div className="flex-1" />
 
@@ -437,16 +556,22 @@ function Badge({
 
 function Stage({
   last,
-  thinking,
+  resolving,
   score,
   ready,
   warming,
+  commit,
+  committing,
+  verification,
 }: {
   last: RoundResponse | null;
-  thinking: boolean;
+  resolving: boolean;
   score: { you: number; ai: number };
   ready: boolean;
   warming: boolean;
+  commit: CommitResponse | null;
+  committing: boolean;
+  verification: Verification;
 }) {
   const verdict = last ? VERDICT[last.outcome] : null;
 
@@ -454,7 +579,7 @@ function Stage({
     <section
       key={last?.round ?? "empty"}
       className={`panel overflow-hidden p-6 sm:p-8 ${
-        last?.outcome === "loss" && !thinking ? "animate-shake" : ""
+        last?.outcome === "loss" && !resolving ? "animate-shake" : ""
       }`}
       aria-live="polite"
     >
@@ -465,16 +590,14 @@ function Stage({
       </div>
 
       <div className="mt-7 grid grid-cols-[1fr_auto_1fr] items-center gap-3 sm:gap-6">
-        <HandCard move={last?.humanMove ?? null} caption="Your throw" thinking={false} />
-
+        <HandCard move={last?.humanMove ?? null} caption="Your throw" />
         <div
           className="readout text-center text-[11px] tracking-[0.2em] uppercase"
           style={{ color: verdict?.hex ?? "#4d6076" }}
         >
-          {thinking ? "…" : verdict ? verdict.label : "—"}
+          {resolving ? "…" : verdict ? verdict.label : "—"}
         </div>
-
-        <HandCard move={thinking ? null : (last?.aiMove ?? null)} caption="AI throw" thinking={thinking} />
+        <HandCard move={resolving ? null : (last?.aiMove ?? null)} caption="AI throw" />
       </div>
 
       <p className="mt-6 text-center text-sm text-dim">
@@ -482,13 +605,63 @@ function Stage({
           ? "Warming up the embedding model. This only takes a moment after the first run."
           : !ready
             ? "Waiting for the memory engine."
-            : thinking
-              ? "Searching memory for situations like this one…"
-              : last
-                ? <ReadLine last={last} />
-                : "Throw to begin. The AI plays blind until it has something to remember."}
+            : last
+              ? <ReadLine last={last} />
+              : "Throw to begin. The AI plays blind until it has something to remember."}
       </p>
+
+      <CommitmentStrip commit={commit} committing={committing} last={last} verification={verification} />
     </section>
+  );
+}
+
+/**
+ * The commitment status line: the hash the AI published before the throw, and
+ * whether the revealed move actually matched it.
+ */
+function CommitmentStrip({
+  commit,
+  committing,
+  last,
+  verification,
+}: {
+  commit: CommitResponse | null;
+  committing: boolean;
+  last: RoundResponse | null;
+  verification: Verification;
+}) {
+  const pendingHash = commit?.hash;
+
+  return (
+    <div className="mt-6 flex flex-wrap items-center justify-center gap-x-4 gap-y-1.5 border-t border-line pt-4">
+      {committing || !pendingHash ? (
+        <span className="readout text-[10px] text-faint">Locking in the next move…</span>
+      ) : (
+        <span className="readout text-[10px] text-faint">
+          next move locked · sha256 {pendingHash.slice(0, 8)}…{pendingHash.slice(-4)}
+        </span>
+      )}
+
+      {last && verification !== "idle" && (
+        <span
+          className="readout text-[10px]"
+          style={{
+            color:
+              verification === "ok"
+                ? "#3ddc97"
+                : verification === "failed"
+                  ? "#ff4f6d"
+                  : "#4d6076",
+          }}
+        >
+          {verification === "ok"
+            ? "✓ last move matched its hash"
+            : verification === "failed"
+              ? "✗ hash mismatch — the move changed"
+              : "· hash check unavailable"}
+        </span>
+      )}
+    </div>
   );
 }
 
@@ -503,24 +676,26 @@ function ReadLine({ last }: { last: RoundResponse }) {
   const read = reasoning.predictedHuman;
   if (!read) return <>Nothing similar in memory yet, so it threw blind.</>;
 
-  const readMark = (
-    <strong style={{ color: MOVE_HEX[read] }}>{MOVE_LABEL[read]}</strong>
-  );
+  const readMark = <strong style={{ color: MOVE_HEX[read] }}>{MOVE_LABEL[read]}</strong>;
 
   if (reasoning.explored) {
     return <>It read {readMark} but threw at random anyway.</>;
   }
 
-  // Sampling can land on an underdog. Saying so keeps this line consistent with
-  // the probability bars, which always highlight the argmax.
+  const verb =
+    reasoning.intent === "lose"
+      ? "and dropped the round on purpose"
+      : reasoning.intent === "draw"
+        ? "and played for a draw"
+        : "and countered";
+
   const target = reasoning.playedAgainst;
   if (target && target !== read) {
     return (
       <>
-        It read {readMark} at {Math.round(reasoning.distribution[read] * 100)}%, took
-        the odds on{" "}
-        <strong style={{ color: MOVE_HEX[target] }}>{MOVE_LABEL[target]}</strong>, and
-        countered that.
+        It read {readMark} at {Math.round(reasoning.distribution[read] * 100)}%, took the
+        odds on <strong style={{ color: MOVE_HEX[target] }}>{MOVE_LABEL[target]}</strong>,{" "}
+        {verb}.
       </>
     );
   }
@@ -528,7 +703,7 @@ function ReadLine({ last }: { last: RoundResponse }) {
   return (
     <>
       It read {readMark} from {reasoning.neighbors} similar memor
-      {reasoning.neighbors === 1 ? "y" : "ies"} and countered.
+      {reasoning.neighbors === 1 ? "y" : "ies"} {verb}.
     </>
   );
 }
@@ -547,25 +722,14 @@ function ScoreColumn({
   return (
     <div className={align === "right" ? "text-right" : "text-left"}>
       <p className="eyebrow">{label}</p>
-      <p
-        className="readout mt-1 text-4xl leading-none font-bold sm:text-5xl"
-        style={{ color: hex }}
-      >
+      <p className="readout mt-1 text-4xl leading-none font-bold sm:text-5xl" style={{ color: hex }}>
         {String(value).padStart(2, "0")}
       </p>
     </div>
   );
 }
 
-function HandCard({
-  move,
-  caption,
-  thinking,
-}: {
-  move: Move | null;
-  caption: string;
-  thinking: boolean;
-}) {
+function HandCard({ move, caption }: { move: Move | null; caption: string }) {
   return (
     <div className="flex flex-col items-center gap-2.5">
       <div
@@ -576,11 +740,7 @@ function HandCard({
           color: move ? MOVE_HEX[move] : "#2b3a4d",
         }}
       >
-        {thinking ? (
-          <span className="animate-blink text-scissors">
-            <MoveGlyph move="scissors" size={44} />
-          </span>
-        ) : move ? (
+        {move ? (
           <span className="animate-pop">
             <MoveGlyph move={move} size={56} />
           </span>
@@ -595,13 +755,7 @@ function HandCard({
 
 /* -------------------------------------------------------------- throw row */
 
-function ThrowRow({
-  onPlay,
-  disabled,
-}: {
-  onPlay: (move: Move) => void;
-  disabled: boolean;
-}) {
+function ThrowRow({ onPlay, disabled }: { onPlay: (move: Move) => void; disabled: boolean }) {
   return (
     <div className="grid grid-cols-3 gap-3">
       {MOVES.map((move) => (
@@ -629,12 +783,19 @@ function ThrowRow({
 function Footer({ status }: { status: StatusResponse | null }) {
   if (!status) return null;
   return (
-    <footer className="readout flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] text-faint">
-      <span>{status.model}</span>
-      <span>{status.dimensions}d · cosine</span>
-      <span>engine: {status.implementation}</span>
-      {status.initMs !== null && <span>init {status.initMs}ms</span>}
-      <span className="truncate">{status.storagePath}</span>
+    <footer className="flex flex-col gap-2">
+      <p className="readout flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] text-faint">
+        <span>{status.model}</span>
+        <span>{status.dimensions}d · cosine</span>
+        <span>engine: {status.implementation}</span>
+        {status.initMs !== null && <span>init {status.initMs}ms</span>}
+        <span className="truncate">{status.storagePath}</span>
+      </p>
+      <p className="text-[10px] leading-relaxed text-faint">
+        The hash check proves the AI&apos;s move did not change after you threw. It is not
+        a guarantee that the server is honest in general — it could always have committed
+        to a bad move in the first place.
+      </p>
     </footer>
   );
 }

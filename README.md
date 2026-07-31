@@ -22,22 +22,62 @@ while that happens. Later starts take 1–2s.
 
 Throw with the buttons or the **R / P / S** keys.
 
-## How the AI actually plays
+## How a round works
 
-Each round runs one `POST /api/round`, and the server:
+The AI picks its move **before you throw**, and publishes a hash of it.
 
-1. **Builds a context string** from the history *ending before* your current
-   move — embedding a context that included the move being predicted would leak
-   the answer.
+`POST /api/commit` — runs as soon as the page loads and after every round:
+
+1. **Builds a context string** from the history so far.
 2. **Embeds it** with `OnnxEmbedder`.
 3. **Searches** the vector store for the `k=12` nearest past situations.
 4. **Aggregates** what you played next in those situations, weighting each
    memory by three independent signals (below).
-5. **Samples** a predicted move from that distribution and plays the counter.
-6. **Records** the episode — context, what you actually played, the AI's move,
-   the outcome, and a monotonic sequence number.
+5. **Picks a move**, stores it server-side with a random nonce, and returns only
+   `sha256(move + ":" + nonce)`.
+
+`POST /api/round` — when you throw:
+
+6. Opens the commitment, resolves the outcome, **records the episode**, and
+   returns the move *and* the nonce so the browser can recompute the hash and
+   check it against what it was shown earlier.
 
 The first 5 rounds are thrown blind so there is something to bootstrap from.
+
+### What the commitment does and does not prove
+
+It proves the revealed move is the one the AI had already chosen when it handed
+over the hash — it cannot have been swapped after seeing your throw. The page
+recomputes the SHA-256 itself and shows a pass/fail badge.
+
+It does **not** prove the server is honest in general. A rigged server could
+always have committed to a rigged move in the first place. The UI says so
+rather than claiming "provably fair".
+
+Worth being clear: the AI never had access to your move even before this change
+— `think()` only ever received history ending before your throw. The two-phase
+flow makes that checkable instead of something you have to take on faith.
+
+Hardening, because a commitment scheme with holes is worse than none:
+
+| Case | Behaviour |
+|---|---|
+| Replaying a spent `commitId` | Rejected — one shot only |
+| An older commitment after a newer one | Rejected — newest per session wins |
+| Another session's `commitId` | Rejected |
+| Memory reset while a commitment is open | Rejected with `stale-memory` |
+| Expiry (30 min) or a server restart | Rejected, client silently re-commits |
+
+### The reveal panel
+
+**The AI's hand** is collapsed by default. Open it and you see the move it has
+already locked in, what it expects you to play, and why — so you can beat it
+every single round. That is the intended behaviour, and it is verified: a
+scripted player that peeks and counters wins **30/30 in all three modes**.
+
+When the panel is closed the server returns only the hash, so a glance at the
+network tab cannot spoil an ordinary game. That is spoiler control, not
+security — you can obviously flip the flag yourself.
 
 ### The context string is coded, not prose
 
@@ -104,31 +144,67 @@ Two things are deliberately *not* in that formula:
   a top share of 0.4 could be a clear winner or a three-way tie; margin is near
   zero on the tie.
 
-### Difficulty
+### Modes steer the score, not the difficulty
 
-Difficulty maps to a sampling temperature *and* an exploration rate, not one
-knob. Below a confidence of 0.35 the temperature is inflated further — that is
-the "don't play a weak read like a strong one" valve.
+There is no difficulty dial. The prediction runs at full strength in all three
+modes — what changes is what the AI *does* with a correct read.
 
-| | temperature | random throws |
+| | It plays | Result |
 |---|---|---|
-| Casual | 1.8 | 35% |
-| Rival | 0.9 | 10% |
-| Ruthless | 0.35 | 5% |
+| **Dominate** (default) | `counter(X)` | Wins every round it reads correctly |
+| **Level** | steered | Holds the score near a tie |
+| **Yield** | `BEATS[X]` | Throws rounds on purpose |
 
-The AI samples rather than always countering its top read. Pure argmax is
-detectable within about ten rounds and invites counter-countering.
+Given a predicted human move X, the AI can aim at any outcome: `counter(X)`
+beats it, `X` draws with it, and `BEATS[X]` — the move X defeats — loses to it.
+For read accuracy `p`, the expected score change per round is:
+
+```
+win  intent →  (3p − 1) / 2
+draw intent →  0, for any p
+lose intent → −(3p − 1) / 2
+```
+
+Two things follow. **Authority is zero at p = 1/3**: a reader no better than
+chance cannot steer the score at all — Yield can only throw a match it can
+actually read. And **draw intent is score-neutral at any p**, which makes it the
+correct hold action for Level, rather than "play honestly" (which drifts the
+score upward).
+
+Level runs a proportional-integral controller on the score error with a
+deadband, so it does not thrash around parity. It stops steering when the read
+is too weak to act on (steering on a bad prediction pushes the score the wrong
+way about as often as the right way), and when you have the reveal panel open —
+correcting for a player who can see your hand just escalates to maximum
+aggression under a label that promises an even game.
+
+Measured over 75 rounds against a predictable player (99% read):
+
+| Mode | Human | AI | Draws | Peak gap |
+|---|---|---|---|---|
+| Dominate | 10 | 57 | 8 | 47 |
+| Level | 12 | 11 | 52 | **1** |
+| Yield | 49 | 11 | 15 | 38 |
+
+Against a *random* player all three land within ±5 of parity, exactly as
+`(3p − 1)/2` predicts once `p` falls to chance.
+
+Even in Dominate the AI samples rather than always countering its top read, and
+throws at random 5% of the time. Pure argmax makes it a fixed function of the
+history, which a human detects in about ten rounds and then counter-counters —
+so a little noise is stronger play, not weaker.
 
 ## Measured behaviour
 
-Against a scripted player, difficulty `ruthless` unless noted:
+Against a scripted player, mode `dominate` unless noted:
 
 | Scenario | Result |
 |---|---|
-| Predictable `R>P>S` cycle, 90 rounds | read rate **87% → 100%** (chance is 33%), AI won 74/90 |
+| Predictable `R>P>S` cycle, 90 rounds | read rate **87% → 100%** (chance is 33%) |
 | Strategy switch mid-game | 100% → **27%** immediately after the switch → 88% → **100%** |
 | Genuinely random player | read rate **30%** ≈ chance, human 26 / AI 23 |
-| Casual vs Rival vs Ruthless, 60 rounds | human won **18**, **17**, **3** |
+| Confidence | **0.67** on a perfect read vs **0.20** on random play |
+| Peeking at the reveal panel | human wins **30/30**, in all three modes |
 
 The strategy-switch row is the interesting one: recency decay means it goes
 blind when you change tactics, then re-learns you.
@@ -136,24 +212,34 @@ blind when you change tactics, then re-learns you.
 The random-player row matters too — it does not manufacture false competence
 against play that genuinely has no pattern.
 
+One caveat on all of these numbers: they come from *scripted* players, which is
+a demo of the mechanism rather than evidence about humans. Against someone
+actively trying to vary, expect something closer to 45–55%. This AI is not going
+to crush you — it is going to know you slightly better than chance, and show its
+working while it does.
+
 ## Layout
 
 ```
 app/
   page.tsx              server shell, kicks off model warmup
-  api/round/route.ts    play a round: predict → resolve → record
+  api/commit/route.ts   lock in the next move, return only its hash
+  api/round/route.ts    open the commitment against a throw, record the episode
   api/status/route.ts   warmup state, memory size, engine info
   api/reset/route.ts    erase all memory
   api/export/route.ts   download the .db file
 lib/
   rps.ts                pure game logic + the context builder
   predict.ts            pure weighting, confidence, sampling
-  engine.ts             singleton store, one round of the adaptive loop
+  score-control.ts      pure intent controller for Level and Yield
+  commit.ts             pending commitments, hashing, one-shot semantics
+  engine.ts             singleton store, commit and resolve
   memory-store.ts       the storage interface  ← swap point
   ruvector-store.ts     RuVector implementation of it
   config.ts             thresholds shared by server and client
 components/
-  game.tsx              state, throws, keyboard, confetti
+  game.tsx              state, commit lifecycle, hash verification, keyboard
+  reveal-panel.tsx      the AI's pending hand, collapsed by default
   proximity-scope.tsx   the radial memory readout
   memory-panel.tsx      context, prediction, strongest memories
   telemetry.tsx         stats, read-rate sparkline, recent rounds

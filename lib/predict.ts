@@ -5,8 +5,8 @@
  * tested on synthetic episode lists.
  */
 
-import { MOVES, counter, randomMove, trailingMatchScore } from "./rps";
-import type { Difficulty, Move, Recalled, Reasoning } from "./types";
+import { BEATS, MOVES, counter, randomMove, trailingMatchScore } from "./rps";
+import type { Intent, Mode, Move, Reasoning, Recalled } from "./types";
 
 /**
  * Softening constant in the inverse-distance weight `1 / (EPS + d^2)`.
@@ -29,39 +29,36 @@ const SUPPORT_TARGET = 5;
 /** Memory size at which the cold-start penalty on confidence fully lifts. */
 const COLD_START_EPISODES = 25;
 
-/** Below this confidence the AI loosens up rather than committing to a read. */
-const LOW_CONFIDENCE_GATE = 0.35;
+/**
+ * Sampling temperature for picking which move to play against.
+ *
+ * The prediction runs at full strength in every mode — this is not a difficulty
+ * dial. It exists because always countering the argmax makes the AI a fixed
+ * function of the history, which a human detects in about ten rounds and then
+ * counter-counters. A little sampling is stronger play, not weaker.
+ */
+const TEMPERATURE = 0.5;
 
-/** How much the temperature is inflated when confidence is below the gate. */
-const GATE_TEMP_MULTIPLIER = 1.6;
+/** Rate of outright random throws, for the same anti-exploitation reason. */
+const EXPLORE_RATE = 0.05;
 
-export interface DifficultyProfile {
-  /** Softmax temperature. <1 sharpens toward the top prediction, >1 flattens. */
-  temperature: number;
-  /** Probability of ignoring memory entirely and throwing at random. */
-  explore: number;
+export interface ModeProfile {
   label: string;
   blurb: string;
 }
 
-export const DIFFICULTY_PROFILES: Record<Difficulty, DifficultyProfile> = {
-  casual: {
-    temperature: 1.8,
-    explore: 0.35,
-    label: "Casual",
-    blurb: "Reads you loosely and throws often enough to keep it friendly.",
+export const MODE_PROFILES: Record<Mode, ModeProfile> = {
+  dominate: {
+    label: "Dominate",
+    blurb: "Plays every read it gets. No handicap, no mercy.",
   },
-  rival: {
-    temperature: 0.9,
-    explore: 0.1,
-    label: "Rival",
-    blurb: "Plays its read, but never becomes fully predictable.",
+  level: {
+    label: "Level",
+    blurb: "Steers the score toward a tie, dropping rounds when it gets ahead.",
   },
-  ruthless: {
-    temperature: 0.35,
-    explore: 0.05,
-    label: "Ruthless",
-    blurb: "Commits hard to the strongest pattern it can find.",
+  yield: {
+    label: "Yield",
+    blurb: "Throws rounds on purpose. The better it reads you, the harder you win.",
   },
 };
 
@@ -149,9 +146,8 @@ export function aggregate(
   // How decisively the winner beat the runner-up. Zero when two moves tie, near
   // one when the vote is lopsided.
   const shares = MOVES.map((move) => distribution[move]).sort((a, b) => b - a);
-  const margin = shares[0] + shares[1] > 0
-    ? (shares[0] - shares[1]) / (shares[0] + shares[1])
-    : 0;
+  const margin =
+    shares[0] + shares[1] > 0 ? (shares[0] - shares[1]) / (shares[0] + shares[1]) : 0;
 
   // Honest confidence: how decisively the winning move beat the alternative,
   // how many memories effectively contributed, and how much the AI has seen.
@@ -187,63 +183,70 @@ export function aggregate(
 }
 
 /**
- * Choose the AI's move from an aggregate, honouring the difficulty profile.
+ * Assemble the AI's reasoning for a round.
  *
- * The AI samples the human's predicted move from a temperature-adjusted
- * distribution and plays its counter, rather than always countering the argmax.
- * Pure argmax is detectable in about ten rounds and invites counter-countering;
- * sampling keeps it beatable while still visibly exploiting real patterns.
+ * `intent` comes from the score controller and decides what the AI does with
+ * its read; this function decides which move that read lands on.
  */
 export function decide(
   aggregateResult: AggregateResult,
-  difficulty: Difficulty,
+  intent: Intent,
   context: string,
   topN: number,
+  control: Reasoning["control"],
 ): Reasoning {
-  const profile = DIFFICULTY_PROFILES[difficulty];
   const { distribution, predictedHuman, confidence, meanDistance, effectiveN, margin, weighted } =
     aggregateResult;
 
-  const topNeighbors = weighted.slice(0, topN);
-
-  // `predictedHuman` stays the argmax regardless of what the AI decides to do
-  // with it: it is the honest statement of the read, and scoring it against the
-  // human's actual move is what makes the read-rate metric meaningful.
   const base: Omit<Reasoning, "explored" | "playedAgainst"> = {
     mode: "adaptive",
     context,
     predictedHuman,
+    intent,
     distribution,
     confidence,
     neighbors: weighted.length,
     meanDistance,
     effectiveN,
     margin,
-    topNeighbors,
+    topNeighbors: weighted.slice(0, topN),
+    control,
   };
 
-  // No usable memory, or a deliberate exploration throw.
-  if (!predictedHuman || Math.random() < profile.explore) {
+  // Exploring is pointless when the AI is trying to lose: a random throw will
+  // not reliably concede, it just adds noise to a deliberate act.
+  const mayExplore = intent !== "lose";
+
+  if (!predictedHuman || (mayExplore && Math.random() < EXPLORE_RATE)) {
     return { ...base, explored: true, playedAgainst: null };
   }
-
-  // A weak read should not be played as though it were a strong one.
-  const temperature =
-    confidence < LOW_CONFIDENCE_GATE
-      ? profile.temperature * GATE_TEMP_MULTIPLIER
-      : profile.temperature;
 
   return {
     ...base,
     explored: false,
-    playedAgainst: sampleWithTemperature(distribution, temperature),
+    playedAgainst: sampleWithTemperature(distribution, TEMPERATURE),
   };
 }
 
-/** The move the AI should actually throw for a given reasoning result. */
+/**
+ * The move the AI should actually throw.
+ *
+ * With a predicted human move X the AI can aim at any of the three outcomes:
+ * `counter(X)` beats it, `X` draws with it, and `BEATS[X]` — the move X
+ * defeats — loses to it. Which one it picks is the score controller's call.
+ */
 export function moveFor(reasoning: Reasoning): Move {
-  if (!reasoning.playedAgainst) return randomMove();
-  return counter(reasoning.playedAgainst);
+  const target = reasoning.playedAgainst;
+  if (!target) return randomMove();
+
+  switch (reasoning.intent) {
+    case "win":
+      return counter(target);
+    case "draw":
+      return target;
+    case "lose":
+      return BEATS[target];
+  }
 }
 
 /**
@@ -256,7 +259,9 @@ export function sampleWithTemperature(
   temperature: number,
 ): Move {
   const safeTemperature = Math.max(temperature, 0.05);
-  const adjusted = MOVES.map((move) => Math.pow(Math.max(distribution[move], 0), 1 / safeTemperature));
+  const adjusted = MOVES.map((move) =>
+    Math.pow(Math.max(distribution[move], 0), 1 / safeTemperature),
+  );
   const total = adjusted.reduce((sum, value) => sum + value, 0);
   if (total <= 0 || !Number.isFinite(total)) return randomMove();
 
