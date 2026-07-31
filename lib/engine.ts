@@ -97,10 +97,14 @@ export class CommitmentError extends Error {
  * reload would build another embedder (3s and ~100MB) and open a second handle
  * on the same database file.
  */
+/** How long to wait before retrying a failed startup, so polling cannot hammer it. */
+const WARMUP_RETRY_COOLDOWN_MS = 5000;
+
 const globalForStore = globalThis as unknown as {
   __rpsStore?: MemoryStore;
   __rpsWarmup?: Promise<void>;
   __rpsError?: string | null;
+  __rpsFailedAt?: number;
 };
 
 export function getStore(): MemoryStore {
@@ -133,15 +137,33 @@ export function warmup(): Promise<void> {
   // data directory while a dev server may be holding it.
   if (process.env.NEXT_PHASE === "phase-production-build") return Promise.resolve();
 
+  // Startup can fail for reasons that later clear on their own — most commonly
+  // another instance still holding the database lock. Caching that failure for
+  // the life of the process would mean a restart was needed even once the cause
+  // was gone, so the memo is dropped on failure and the next call retries.
+  const failedAt = globalForStore.__rpsFailedAt ?? 0;
+  if (
+    globalForStore.__rpsWarmup === undefined &&
+    failedAt > 0 &&
+    Date.now() - failedAt < WARMUP_RETRY_COOLDOWN_MS
+  ) {
+    // Still cooling down. Keep the recorded error rather than retrying on every
+    // poll, which would restart the model load several times a second.
+    return Promise.resolve();
+  }
+
   globalForStore.__rpsWarmup ??= getStore()
     .init()
     .then(() => {
       globalForStore.__rpsError = null;
+      globalForStore.__rpsFailedAt = 0;
     })
     .catch((error: unknown) => {
       globalForStore.__rpsError = error instanceof Error ? error.message : String(error);
+      globalForStore.__rpsFailedAt = Date.now();
+      globalForStore.__rpsWarmup = undefined;
     });
-  return globalForStore.__rpsWarmup;
+  return globalForStore.__rpsWarmup ?? Promise.resolve();
 }
 
 export function warmupError(): string | null {
