@@ -6,10 +6,14 @@
  * that could drift out of sync.
  */
 
-/** Rounds played with no memory lookup at all, so the store can bootstrap. */
-export const BOOTSTRAP_ROUNDS = 5;
-
-/** Episodes required before prediction is meaningful rather than noise. */
+/**
+ * Episodes required before prediction is meaningful rather than noise.
+ *
+ * The only cold-start gate there is. A `BOOTSTRAP_ROUNDS` constant used to sit
+ * beside this and force a few blind rounds at the start of every visit; it was
+ * removed when memory became persistent, because by then it was discarding a
+ * returning player's opening habit rather than protecting against noise.
+ */
 export const MIN_MEMORY_FOR_ADAPTIVE = 6;
 
 /** Upper bound on neighbours retrieved per prediction. */

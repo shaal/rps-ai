@@ -4,18 +4,16 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   /**
-   * Pin the workspace root. A stray lockfile in a parent directory otherwise
-   * makes Turbopack infer the wrong root, which changes how the native ruvector
-   * packages resolve.
+   * Static export. There is no server left to run: the opponent, its memory
+   * and its maths all execute in the browser, so the whole game ships as
+   * files and can be hosted anywhere — including Cloudflare's free tier.
    */
+  output: "export",
+
+  /** Pin the workspace root, so a stray lockfile in a parent directory cannot
+   *  make the bundler infer the wrong one. */
   turbopack: { root: path.resolve(".") },
 
-  /**
-   * `ruvector` loads a platform-specific native `.node` addon and a WASM ONNX
-   * runtime off disk at require time. Bundling either one breaks the load, so
-   * they must stay external and resolved by Node at runtime.
-   */
-  serverExternalPackages: ["ruvector", "@ruvector/core"],
 };
 
 export default nextConfig;

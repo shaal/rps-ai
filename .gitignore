@@ -45,3 +45,11 @@ next-env.d.ts
 
 # local tooling artifacts
 /.claude-flow
+
+# static export output
+/out
+
+# local agent tooling, not part of the app
+/.agents
+/.claude
+/skills-lock.json

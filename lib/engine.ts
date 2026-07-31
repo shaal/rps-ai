@@ -1,14 +1,13 @@
 /**
- * Orchestration layer: owns the process-wide memory store and drives the two
- * halves of a round — commit, then resolve. Server-only.
+ * Orchestration layer: owns the memory store and drives the two halves of a
+ * round — commit, then resolve.
+ *
+ * Runs in the browser now. It used to be server-only, and the only reasons
+ * were the store underneath it and a couple of Node globals; the round logic
+ * itself never cared where it executed.
  */
 
-import "server-only";
-
-import path from "node:path";
-
 import {
-  BOOTSTRAP_ROUNDS,
   MIN_MEMORY_FOR_ADAPTIVE,
   NEIGHBORS_RETURNED,
   RECALL_K,
@@ -24,7 +23,7 @@ import {
   setSessionIntegral,
   takeCommit,
 } from "./commit";
-import { RuVectorStore } from "./ruvector-store";
+import { BrowserMemoryStore } from "./browser-store";
 import type { MemoryStore } from "./memory-store";
 import { aggregate, decide, moveFor } from "./predict";
 import { decideIntent } from "./score-control";
@@ -51,9 +50,8 @@ import type {
 /** Hard cap on client-supplied history, so a bad request cannot blow up memory. */
 const MAX_HISTORY = 32;
 
-/** Persistent memory lives inside the project so it survives server restarts. */
-export const DATA_DIR = path.join(process.cwd(), "data");
-export const DB_FILENAME = "rps-memory.db";
+/** Names the storage generation; see `memoryGeneration`. */
+export const DB_FILENAME = "rps-memory";
 
 /** One entry of the recent history the client replays to the server each round. */
 export interface HistoryEntry {
@@ -108,10 +106,7 @@ const globalForStore = globalThis as unknown as {
 };
 
 export function getStore(): MemoryStore {
-  globalForStore.__rpsStore ??= new RuVectorStore({
-    dataDir: DATA_DIR,
-    fileName: DB_FILENAME,
-  });
+  globalForStore.__rpsStore ??= new BrowserMemoryStore();
   return globalForStore.__rpsStore;
 }
 
@@ -121,7 +116,10 @@ export function getStore(): MemoryStore {
  * recorded into the new one.
  */
 export function memoryGeneration(): string {
-  return path.basename(getStore().filePath() ?? DB_FILENAME);
+  // Nothing is file-backed in the browser, so the generation is just the
+  // store's own label. Reset clears in place rather than rotating a file,
+  // and stale commitments are already rejected by id.
+  return getStore().filePath() ?? DB_FILENAME;
 }
 
 /**
@@ -132,10 +130,9 @@ export function memoryGeneration(): string {
  * unhandled rejection cannot take down the process.
  */
 export function warmup(): Promise<void> {
-  // `next build` evaluates route and page modules to collect page data. Warming
-  // up there would load the ONNX model into every build worker and touch the
-  // data directory while a dev server may be holding it.
-  if (process.env.NEXT_PHASE === "phase-production-build") return Promise.resolve();
+  // There is no store to open while prerendering, and IndexedDB does not
+  // exist there either.
+  if (typeof window === "undefined") return Promise.resolve();
 
   // Startup can fail for reasons that later clear on their own — most commonly
   // another instance still holding the database lock. Caching that failure for
@@ -243,7 +240,6 @@ export async function commitRound(request: CommitRequest): Promise<CommitRespons
     context,
     tail,
     memorySize,
-    historyLength: history.length,
     mode,
     revealed,
     sessionId,
@@ -253,7 +249,7 @@ export async function commitRound(request: CommitRequest): Promise<CommitRespons
   const now = Date.now();
   const nonce = newNonce();
   const commitId = newId();
-  const hash = commitmentHash(aiMove, nonce);
+  const hash = await commitmentHash(aiMove, nonce);
 
   putCommit({
     commitId,
@@ -351,7 +347,6 @@ interface ThinkArgs {
   context: string;
   tail: string;
   memorySize: number;
-  historyLength: number;
   mode: Mode;
   revealed: boolean;
   sessionId: string;
@@ -370,14 +365,27 @@ async function think({
   context,
   tail,
   memorySize,
-  historyLength,
   mode,
   revealed,
   sessionId,
   history,
 }: ThinkArgs): Promise<ThinkResult> {
-  const bootstrapping =
-    historyLength < BOOTSTRAP_ROUNDS || memorySize < MIN_MEMORY_FOR_ADAPTIVE;
+  /**
+   * Only the store's size gates this now.
+   *
+   * There used to be a second condition, `historyLength < BOOTSTRAP_ROUNDS`,
+   * requiring a handful of rounds in the current visit. That made sense when
+   * memory was one shared pool wiped on every restart: an opening genuinely
+   * told you nothing about the person in front of you. With memory persisted
+   * per browser it does the opposite — it throws away the strongest personal
+   * signal there is. What someone opens with is a habit, it is stored, and the
+   * gate meant reloading the tab made the opponent play blind for five rounds
+   * while holding the answer.
+   *
+   * A brand-new browser still gets random play until the store fills, which is
+   * what the cold start actually needs.
+   */
+  const bootstrapping = memorySize < MIN_MEMORY_FOR_ADAPTIVE;
 
   if (bootstrapping) {
     const reasoning = bootstrapReasoning(context);

@@ -118,12 +118,17 @@ export interface ContextInput {
 /**
  * Turn recent history into the string that gets embedded.
  *
- * Deliberately NOT natural prose. A sentence-transformer maps near-identical
- * English templates into a very tight cosine ball, which flattens the distance
- * signal until inverse-distance weighting is weighting noise. Dense coded slots
- * maximise lexical contrast between differing situations, so the retrieved
- * neighbours actually rank by strategic similarity. It also happens to read
- * well in a monospace panel, which is why the UI shows it raw.
+ * Deliberately NOT natural prose. The original reason was that a sentence
+ * transformer maps near-identical English templates into a very tight cosine
+ * ball, flattening the distance signal until inverse-distance weighting is
+ * weighting noise; dense coded slots clawed the contrast back.
+ *
+ * There is no transformer any more — `feature-embed` reads these slots
+ * directly — and in hindsight that need was the tell. A format invented to
+ * survive an embedding model was already a feature vector; it just had to be
+ * parsed instead of translated. The shape stays because it is now the literal
+ * serialisation of the vector, and because it reads well raw in a monospace
+ * panel, which is why the UI shows it.
  *
  * Shape: `H:R>P>P>S A:S>S>P>R st:S1 out:L,W,D bg:RP,PP,PS fq:R1P2S1`
  *

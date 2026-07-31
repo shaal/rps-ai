@@ -73,27 +73,34 @@ export function InstrumentPanel({
             <h2 className="eyebrow">Instrument</h2>
             <Explainer label="How the AI predicts your next throw" title="How it reads you">
               <p>
-                After every round the AI writes itself a short note about the situation: what
-                you both just played, who is ahead, how the last few rounds went. That note is
-                then turned into a long list of numbers — think of it as a position on a map,
-                where notes describing similar situations end up near each other.
+                After every round it writes a short code for the situation — your recent
+                throws, its own, any streak, who won the last few, and how often you have
+                played each move. Deliberately not a sentence. A dense note.
               </p>
               <p>
-                Before your next throw it writes a note about <strong>right now</strong>, finds
-                its nearest notes from the past, and reads what you did next in each of them.
-                The answer that keeps coming up is its prediction, and closer memories count
-                for more than distant ones.
+                That note becomes a fixed list of 55 numbers. Situations that resemble each
+                other end up with similar lists. Before your next throw it writes the note for{" "}
+                <strong>right now</strong>, finds the closest notes in this browser&apos;s
+                memory, and looks at what <strong>you</strong> played next in each one.
               </p>
               <p>
-                That is the whole trick. It is not reasoning about rock, paper and scissors —
-                it is asking <strong>“when things looked like this before, what did this person
-                do?”</strong> Which is why it knows nothing until you have given it a handful
-                of rounds to remember.
+                Closer and more recent memories count for more. The move that keeps winning
+                that vote is its read. What it then does with that read — counter it, mirror
+                it, or lose to it on purpose — is up to the mode.
               </p>
               <p>
-                The dial below is that lookup, drawn. Every dot is one memory, coloured by what
-                you played next. The nearer the centre, the more similar it was — and the
-                bigger the dot, the more it counted toward the guess.
+                It is not reasoning about rock, paper and scissors. It is asking{" "}
+                <strong>“when things looked like this before, what did this person do
+                next?”</strong> Which is why a brand-new browser gets random throws until the
+                memory has enough in it to search — those blind rounds are still recorded, and
+                they are how the map fills in. Come back later and it starts reading you from
+                the very first throw, because &ldquo;this person is opening a fresh session&rdquo; is
+                itself a situation it has seen before.
+              </p>
+              <p>
+                The dial below is that lookup, drawn. Each dot is one memory, coloured by what
+                you played next. Nearer the centre means more similar; bigger means it carried
+                more weight in the vote.
               </p>
             </Explainer>
           </div>
@@ -386,9 +393,17 @@ function ReadBlock({
       <dl className="mt-4 grid grid-cols-2 gap-2 text-center sm:grid-cols-4">
         <Metric label="neighbors" value={String(reasoning.neighbors)} />
         <Metric label="margin" value={`${Math.round(reasoning.margin * 100)}%`} />
-        <Metric label="eff. N" value={reasoning.effectiveN.toFixed(1)} />
-        <Metric label="mean dist" value={reasoning.meanDistance.toFixed(3)} />
+        {/* Was "eff. N", which is only readable if you already know the term. */}
+        <Metric label="support" value={reasoning.effectiveN.toFixed(1)} />
+        <Metric label="avg distance" value={reasoning.meanDistance.toFixed(3)} />
       </dl>
+
+      {/* One line beats a fifth question mark for two numbers. */}
+      <p className="mt-2 text-[0.75rem] leading-relaxed text-faint">
+        <strong>Confidence</strong> is how decisive the vote was.{" "}
+        <strong>Support</strong> is how many memories really shared the weight — 1.0 means a
+        single memory decided it.
+      </p>
 
       {reasoning.explored && (
         <p className="mt-3 text-[0.75rem] leading-relaxed text-warn">

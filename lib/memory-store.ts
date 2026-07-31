@@ -1,12 +1,15 @@
 /**
  * The storage seam.
  *
- * Everything above this interface — the game, the prediction math, the API
- * routes — is unaware of RuVector. `RuVectorStore` is the real implementation
- * (native N-API vector engine + local ONNX embeddings, persisted to a file on
- * disk). Swapping in a different backend, for a runtime that cannot load native
- * addons, means writing one more class against this interface and changing the
- * single factory call in `lib/engine.ts`.
+ * Everything above this interface — the game, the prediction maths, the UI — is
+ * unaware of where memory lives. `BrowserMemoryStore` is the implementation:
+ * a feature encoder, an in-memory matrix and IndexedDB.
+ *
+ * It was written for a native N-API vector engine writing files on a server,
+ * and the note here said that swapping in a backend "for a runtime that cannot
+ * load native addons" would mean one new class and one changed factory call.
+ * That turned out to be exactly true — the whole port to the browser touched
+ * this file not at all.
  */
 
 import type { EpisodeMeta, Recalled } from "./types";
