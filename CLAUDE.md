@@ -54,16 +54,36 @@ inspected move frequencies, so it walked past all of them.
 ## Settled decisions
 
 **No vector database.** `ruvector` was used originally and removed deliberately
-(commit `2de206b`) — it needed a Node server, a native addon, and an 86MB ONNX
-model, and the transformer was *worse* at the discrimination k-NN needs (0.9934
-cosine between one-move-different contexts, against 0.6978 for the hand-written
-encoder). Re-checked against shipped package files in July 2026: `ruvector`
-still cannot run in a browser and its "wasm" fallback is a stub whose `search()`
-returns `[]` while reporting success. `@ruvector/rvlite` does work in-browser
-but costs 239KB brotli to replace a brute-force scan that is already faster at
-this scale. Exact cosine over 5000×57 is sub-millisecond; ANN solves a problem
-this project does not have until roughly a million episodes. Do not re-litigate
-without a server and a shared corpus, which is a different product.
+(commit `2de206b`). Three reasons, and only the first two survive scrutiny:
+
+1. **Embedding quality.** The sentence transformer was *worse* at the
+   discrimination k-NN needs — 0.9934 cosine between one-move-different
+   contexts, against 0.6978 for the hand-written encoder. That is a property of
+   the model, not of how it is packaged, so it holds however the library ships.
+2. **Scale.** At most 5000 episodes of 57 dimensions. Exact cosine over that is
+   sub-millisecond and returns the true neighbours rather than an estimate. ANN
+   solves a problem this project does not have until roughly a million episodes.
+   Weight matters too: the whole site is ~1.2MB.
+3. ~~It cannot run in a browser.~~ **This was too strong and is retracted.** The
+   *npm package* cannot: `ruvector@0.2.40` is CJS, `node>=20`, no `browser`
+   field, and uses `fs`/`os`/`worker_threads` on the main import path. But
+   ruvector's Rust core compiled with `wasm-pack --target web` runs client-side
+   perfectly well — a sibling project (`shaal/VrumVector`, also static on
+   Cloudflare Pages) vendors exactly that and does real ANN in the browser.
+   Do not repeat the packaging objection; it is wrong.
+
+**Still a live hazard**, and worth more attention than the retraction above:
+when `ruvector`'s native and rvf backends both fail to load, `dist/index.js`
+(~L80-94) installs a stub whose `search()` returns `[]` and `insert()` returns a
+fake id — while setting `implementationType = 'wasm'`, so it reports success
+while being blind. Commit `7a0d20a` added a startup guard against exactly this.
+The same pattern exists in other crates upstream. **If anything here ever loads
+a vector engine again, prove it works with an insert-then-query harness rather
+than trusting a backend label.**
+
+Re-litigating is reasonable only with a server and a shared cross-player corpus,
+which is a different product. See "Server vs static" reasoning in the session
+that added this file.
 
 **Confidence carries no absolute-distance term**, deliberately. These vectors
 sit within ~0.001–0.09 cosine of each other, so `1 - d/reference` stays pinned
