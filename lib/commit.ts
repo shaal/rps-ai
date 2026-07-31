@@ -146,6 +146,27 @@ export function takeCommit(commitId: string, sessionId: string): TakeResult {
   return { ok: true, commit };
 }
 
+/**
+ * Look at a commitment without consuming it.
+ *
+ * This is how the Foresight view discloses the AI's move. Crucially it does not
+ * mint a new commitment: peeking leaves the sealed move and its published hash
+ * exactly as they were, so looking cannot re-roll what the AI is about to play.
+ */
+export function peekCommit(commitId: string, sessionId: string): TakeResult {
+  sweep();
+
+  const commit = pending().get(commitId);
+  if (!commit) return { ok: false, reason: "unknown" };
+  if (commit.sessionId !== sessionId) return { ok: false, reason: "superseded" };
+  if (latestBySession().get(sessionId) !== commitId) {
+    return { ok: false, reason: "superseded" };
+  }
+  if (Date.now() > commit.expiresAt) return { ok: false, reason: "expired" };
+
+  return { ok: true, commit };
+}
+
 /** Drop expired entries, and the oldest ones if the map is over its cap. */
 function sweep(): void {
   const now = Date.now();

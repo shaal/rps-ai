@@ -188,6 +188,34 @@ body::after {
   transition: width 520ms cubic-bezier(0.2, 0.8, 0.3, 1);
 }
 
+/* --------------------------------------------------------------- flip ----- */
+
+.flip-scene {
+  perspective: 1800px;
+}
+
+/* Both faces occupy the same grid cell, so the card is as tall as the taller
+   one and nothing jumps mid-flip. */
+.flip-inner {
+  display: grid;
+  transform-style: preserve-3d;
+  transition: transform 620ms cubic-bezier(0.2, 0.8, 0.3, 1);
+}
+
+.flip-inner.is-flipped {
+  transform: rotateY(180deg);
+}
+
+.flip-face {
+  grid-area: 1 / 1;
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+}
+
+.flip-face--back {
+  transform: rotateY(180deg);
+}
+
 /* ------------------------------------------------------------- motion ----- */
 
 @keyframes rise {
@@ -314,5 +342,22 @@ body::after {
 
   .throw:hover:not(:disabled) {
     transform: none;
+  }
+
+  /* No 3D rotation. The faces swap outright, which still reads as a mode
+     change without spinning anything. */
+  .flip-inner,
+  .flip-inner.is-flipped,
+  .flip-face--back {
+    transform: none !important;
+  }
+
+  .flip-face {
+    backface-visibility: visible;
+    -webkit-backface-visibility: visible;
+  }
+
+  .flip-face[data-active="false"] {
+    visibility: hidden;
   }
 }

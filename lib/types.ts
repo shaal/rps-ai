@@ -127,14 +127,20 @@ export interface RoundRecord {
   ts: number;
 }
 
-/** What the AI committed to, revealed early because the player asked to see it. */
+/** What the AI committed to, disclosed early because the player asked to see it. */
 export interface RevealPayload {
   /** The move the AI has already locked in for this round. */
   aiMove: Move;
   reasoning: Reasoning;
 }
 
-/** Response body of `POST /api/commit`. */
+/**
+ * Response body of `POST /api/commit`. Always hash-only.
+ *
+ * Disclosure happens through `POST /api/peek`, which reads the same sealed
+ * commitment rather than minting a new one — so switching to Foresight can
+ * never re-roll the AI's move or invalidate a hash already shown.
+ */
 export interface CommitResponse {
   commitId: string;
   /** `sha256(aiMove + ":" + nonce)`. Verifiable after the round resolves. */
@@ -143,8 +149,13 @@ export interface CommitResponse {
   round: number;
   memorySize: number;
   mode: Mode;
-  /** Populated only when the player has the reveal panel open. */
-  reveal: RevealPayload | null;
+}
+
+/** Response body of `POST /api/peek`. */
+export interface PeekResponse extends RevealPayload {
+  /** Echoed so the client can tell which commitment this disclosure describes. */
+  commitId: string;
+  round: number;
 }
 
 /** Response body of `POST /api/round`. */
