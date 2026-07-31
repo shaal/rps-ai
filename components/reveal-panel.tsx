@@ -41,6 +41,7 @@ export function RevealPanel({
   committing: boolean;
 }) {
   const reveal = commit?.reveal ?? null;
+  const round = commit?.round ?? null;
 
   return (
     <section className="panel overflow-hidden" aria-label="The AI's committed move">
@@ -67,8 +68,17 @@ export function RevealPanel({
             </span>
           </span>
         </span>
-        <span className="readout shrink-0 text-[11px] tracking-wide text-faint uppercase">
-          {open ? "Hide" : "Show"}
+        <span className="flex shrink-0 items-center gap-3">
+          {/* Names the round explicitly. This panel is always one ahead of the
+              memory panel, which describes the round already played. */}
+          {round !== null && (
+            <span className="readout hidden text-[10px] text-faint sm:inline">
+              round {round} · not thrown yet
+            </span>
+          )}
+          <span className="readout text-[11px] tracking-wide text-faint uppercase">
+            {open ? "Hide" : "Show"}
+          </span>
         </span>
       </button>
 
@@ -135,12 +145,15 @@ function RevealBody({
           </p>
         ) : (
           <div>
-            <div className="mb-2 flex items-baseline justify-between">
+            <div className="mb-1 flex items-baseline justify-between gap-3">
               <h3 className="eyebrow">It expects you to play</h3>
               <span className="readout text-[10px] text-faint">
                 confidence {Math.round(reasoning.confidence * 100)}%
               </span>
             </div>
+            <p className="mb-2 text-[11px] leading-relaxed text-faint">
+              Its read for the round you are about to throw.
+            </p>
             <div className="flex flex-col gap-1.5">
               {MOVES.map((candidate) => {
                 const share = reasoning.distribution[candidate];

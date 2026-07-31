@@ -79,6 +79,19 @@ When the panel is closed the server returns only the hash, so a glance at the
 network tab cannot spoil an ordinary game. That is spoiler control, not
 security — you can obviously flip the flag yourself.
 
+**The two panels are always one round apart.** The reveal panel describes the
+round you have not thrown yet; **Memory recall** on the right is retrospective
+and describes the round you just played. Their confidence figures therefore
+differ at any given moment, which looks like an inconsistency until you notice
+they are about different rounds — so both now label theirs (`round 13 · not
+thrown yet` against `round 12 · played`).
+
+They are the same numbers, one step apart: `resolveRound` returns the exact
+reasoning object stored at commit time, so once a round is thrown the memory
+panel shows precisely what the reveal panel showed beforehand. Verified in the
+browser — reveal at round 13 read `44/26/30, conf 10%`, and after throwing, the
+memory panel read `44/26/30, conf 10%`.
+
 ### The context string is coded, not prose
 
 The obvious approach is a natural-language context like

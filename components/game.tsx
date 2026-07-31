@@ -342,7 +342,11 @@ export function Game() {
           <Telemetry history={history} memorySize={status?.memorySize ?? 0} />
         </div>
 
-        <MemoryPanel reasoning={last?.reasoning ?? null} scanning={resolving} />
+        <MemoryPanel
+          reasoning={last?.reasoning ?? null}
+          scanning={resolving}
+          round={last?.round ?? null}
+        />
       </main>
 
       <Footer status={status} />

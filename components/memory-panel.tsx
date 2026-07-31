@@ -8,19 +8,29 @@ import type { Move, Reasoning } from "@/lib/types";
 export function MemoryPanel({
   reasoning,
   scanning,
+  round,
 }: {
   reasoning: Reasoning | null;
   scanning: boolean;
+  /** The round this panel describes — always one already played. */
+  round: number | null;
 }) {
   const neighbors = reasoning?.topNeighbors ?? [];
   const bootstrapping = !reasoning || reasoning.mode === "bootstrap";
 
   return (
     <section className="panel flex flex-col gap-5 p-5" aria-label="AI memory">
-      <header className="flex items-baseline justify-between">
+      {/* This panel is always retrospective. The reveal panel covers the round
+          that has not been thrown yet, and the two are one round apart, so both
+          say which round they mean. */}
+      <header className="flex items-baseline justify-between gap-3">
         <h2 className="eyebrow">Memory recall</h2>
         <span className="readout text-[10px] text-faint">
-          {scanning ? "searching…" : `${neighbors.length} retrieved`}
+          {scanning
+            ? "searching…"
+            : round !== null
+              ? `round ${round} · played`
+              : "nothing played yet"}
         </span>
       </header>
 
@@ -29,7 +39,7 @@ export function MemoryPanel({
       <div className="hairline" />
 
       <div>
-        <h3 className="eyebrow mb-2">Query context</h3>
+        <h3 className="eyebrow mb-2">Context it matched</h3>
         <p className="readout rounded-lg border border-line bg-void/60 p-3 text-[11px] leading-relaxed break-words text-dim">
           {reasoning?.context ?? "—"}
         </p>
@@ -62,7 +72,7 @@ function Prediction({
   if (bootstrapping || !reasoning) {
     return (
       <div>
-        <h3 className="eyebrow mb-2">Prediction</h3>
+        <h3 className="eyebrow mb-2">What it expected</h3>
         <p className="text-[11px] leading-relaxed text-faint">
           The AI is still bootstrapping — it throws blind until it has enough
           episodes to search.
@@ -75,10 +85,16 @@ function Prediction({
 
   return (
     <div>
-      <div className="mb-3 flex items-baseline justify-between">
-        <h3 className="eyebrow">Predicted next throw</h3>
+      {/* Past tense throughout. An earlier version titled this "Predicted next
+          throw", which read as a forecast for the upcoming round and made these
+          numbers look inconsistent with the reveal panel's. */}
+      <div className="mb-1 flex items-baseline justify-between gap-3">
+        <h3 className="eyebrow">What it expected from you</h3>
         <span className="readout text-[10px] text-faint">confidence {confidence}%</span>
       </div>
+      <p className="mb-3 text-[11px] leading-relaxed text-faint">
+        Its read going into the round you just played.
+      </p>
 
       <div className="flex flex-col gap-2">
         {MOVES.map((move) => (
