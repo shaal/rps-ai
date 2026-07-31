@@ -18,7 +18,6 @@
  * Foresight does not re-roll it.
  */
 
-import { EVEN_WEIGHTS, type ExpertWeights, type Opinion } from "./experts";
 import type { Intent, Move, Reasoning } from "./types";
 
 /** How long an unopened commitment stays valid. Generous — this is one player. */
@@ -49,15 +48,6 @@ export interface PendingCommit {
   memoryGen: string;
   /** Controller integral to carry forward if this commitment is opened. */
   integral: number;
-  /**
-   * What every expert predicted for this round.
-   *
-   * Carried on the commitment rather than recomputed at resolve time, because
-   * the standings must be scored against what the experts actually said when
-   * the move was sealed. Recomputing would score them against a history that
-   * already includes the throw they were trying to predict.
-   */
-  opinions: Record<string, Opinion>;
   createdAt: number;
   expiresAt: number;
 }
@@ -65,15 +55,6 @@ export interface PendingCommit {
 interface SessionState {
   /** Accumulated score error for the Level controller. */
   integral: number;
-  /**
-   * How much the committee currently trusts each predictor.
-   *
-   * Deliberately per-session and not persisted, unlike the episodes themselves.
-   * Standings turn over in about three rounds, so a returning player rebuilds
-   * them before the difference is visible — where memory takes hundreds of
-   * episodes to be worth anything, which is why that one is worth a database.
-   */
-  standings: ExpertWeights;
 }
 
 const globalForCommits = globalThis as unknown as {
@@ -121,17 +102,13 @@ export function newId(): string {
 export function getSessionState(sessionId: string): SessionState {
   const existing = sessions().get(sessionId);
   if (existing) return existing;
-  const fresh: SessionState = { integral: 0, standings: EVEN_WEIGHTS };
+  const fresh: SessionState = { integral: 0 };
   sessions().set(sessionId, fresh);
   return fresh;
 }
 
 export function setSessionIntegral(sessionId: string, integral: number): void {
   getSessionState(sessionId).integral = integral;
-}
-
-export function setSessionStandings(sessionId: string, standings: ExpertWeights): void {
-  getSessionState(sessionId).standings = standings;
 }
 
 /**

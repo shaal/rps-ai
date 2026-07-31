@@ -21,14 +21,12 @@ import {
   peekCommit,
   putCommit,
   setSessionIntegral,
-  setSessionStandings,
   takeCommit,
 } from "./commit";
 import { BrowserMemoryStore } from "./browser-store";
-import { type Opinion, combine, opinionsFrom, reweigh } from "./experts";
 import type { MemoryStore } from "./memory-store";
-import { aggregate, applyCommittee, decide, moveFor } from "./predict";
-import { priorFrom, priorStrength } from "./prior";
+import { aggregate, decide, moveFor } from "./predict";
+import { priorFrom } from "./prior";
 import { decideIntent } from "./score-control";
 import {
   buildContext,
@@ -238,7 +236,7 @@ export async function commitRound(request: CommitRequest): Promise<CommitRespons
   const tail = historyTail(humanMoves);
   const memorySize = await store.size();
 
-  const { reasoning, aiMove, nextIntegral, opinions } = await think({
+  const { reasoning, aiMove, nextIntegral } = await think({
     store,
     context,
     tail,
@@ -268,7 +266,6 @@ export async function commitRound(request: CommitRequest): Promise<CommitRespons
     round,
     memoryGen: memoryGeneration(),
     integral: nextIntegral,
-    opinions,
     createdAt: now,
     expiresAt: expiryFrom(now),
   });
@@ -333,15 +330,6 @@ export async function resolveRound(request: ResolveRequest): Promise<RoundRespon
 
   setSessionIntegral(sessionId, commit.integral);
 
-  // Settle the committee's bets. Scored against what the experts said when the
-  // move was sealed, which is why those opinions rode along on the commitment.
-  if (Object.keys(commit.opinions).length > 0) {
-    setSessionStandings(
-      sessionId,
-      reweigh(getSessionState(sessionId).standings, commit.opinions, humanMove),
-    );
-  }
-
   return {
     humanMove,
     aiMove: commit.aiMove,
@@ -370,8 +358,6 @@ interface ThinkResult {
   reasoning: Reasoning;
   aiMove: Move;
   nextIntegral: number;
-  /** What each expert said, so the standings can be scored once the human throws. */
-  opinions: Record<string, Opinion>;
 }
 
 /** Decide how the AI plays this round — bootstrap throw or memory-driven read. */
@@ -404,7 +390,7 @@ async function think({
 
   if (bootstrapping) {
     const reasoning = bootstrapReasoning(context);
-    return { reasoning, aiMove: randomMove(), nextIntegral: 0, opinions: {} };
+    return { reasoning, aiMove: randomMove(), nextIntegral: 0 };
   }
 
   // Asking for more neighbours than exist just wastes work, and early on it
@@ -414,11 +400,10 @@ async function think({
 
   if (recalled.length === 0) {
     const reasoning = bootstrapReasoning(context);
-    return { reasoning, aiMove: randomMove(), nextIntegral: 0, opinions: {} };
+    return { reasoning, aiMove: randomMove(), nextIntegral: 0 };
   }
 
-  const baseRate = priorFrom(await store.moveTally());
-  const memory = aggregate({
+  const aggregated = aggregate({
     recalled: recalled.map((episode) => ({ ...episode, influence: 0 })),
     // Not `memorySize`. The two agree until the retention cap, after which the
     // size freezes while episode indices keep climbing, and every `age` in the
@@ -426,27 +411,8 @@ async function think({
     currentSeq: await store.currentSeq(),
     tail,
     memorySize,
-    prior: baseRate,
+    prior: priorFrom(await store.moveTally()),
   });
-
-  // The memory is one voice on the panel. It is usually the loudest, and it is
-  // the only member that can learn a habit nobody wrote a rule for.
-  const opinions = opinionsFrom(
-    {
-      human: history.map((entry) => entry.humanMove),
-      ai: history.map((entry) => entry.aiMove),
-      outcomes: history.map((entry) => entry.outcome),
-    },
-    memory.distribution,
-  );
-  const panel = combine(
-    opinions,
-    getSessionState(sessionId).standings,
-    // A skewed base rate means this player is not answering the question the
-    // heuristics ask. See the note on `combine`.
-    1 - priorStrength(baseRate),
-  );
-  const aggregated = applyCommittee(memory, panel, memorySize);
 
   const { error, humanWinStreak } = scoreFrom(history);
   const decision = decideIntent({
@@ -471,7 +437,6 @@ async function think({
     reasoning,
     aiMove: moveFor(reasoning),
     nextIntegral: decision.nextIntegral,
-    opinions,
   };
 }
 
@@ -509,7 +474,6 @@ function bootstrapReasoning(context: string): Reasoning {
     // MIN_MEMORY_FOR_ADAPTIVE episodes behind it the tally is still within a
     // pseudo-count of uniform, so acting on it would dress up a coin flip.
     priorWeight: 0,
-    contributions: {},
     explored: true,
     topNeighbors: [],
     control: null,
