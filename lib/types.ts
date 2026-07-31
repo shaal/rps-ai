@@ -104,8 +104,15 @@ export interface Reasoning {
    * Share of the distribution taken from this player's base rate rather than
    * from recalled episodes. Rises as confidence in the neighbourhood falls; at
    * 1 the AI is playing the odds rather than a read. See `lib/prior.ts`.
+   *
+   * Describes the memory expert's own vote, before the committee weighs in.
    */
   priorWeight: number;
+  /**
+   * Each predictor's share of the final vote, keyed by expert name and summing
+   * to 1. Empty while bootstrapping. See `lib/experts.ts`.
+   */
+  contributions: Record<string, number>;
   /** True when the AI deliberately threw a random move instead of acting on its read. */
   explored: boolean;
   /** The closest episodes, for the "what the AI remembered" panel. */

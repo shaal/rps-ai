@@ -39,6 +39,8 @@ The AI picks its move **before you throw**, and publishes a hash of it.
 4. **Aggregates** what you played next in those situations, weighting each
    memory by three independent signals, then mixes in how often you throw each
    move at all (below).
+5. **Puts that to a panel** of rival predictors, each weighted by how well it
+   has been calling your throws lately.
 5. **Picks a move**, keeps it with a random nonce, and surfaces only
    `sha256(move + ":" + nonce)`.
 
@@ -176,6 +178,46 @@ strength** is the guard: total variation distance from uniform, saturating at a
 shouting. Below that saturation point the deviation is within a few standard
 errors of what shuffling produces at this sample size.
 
+### The committee
+
+All of the above is still one hypothesis: that your next move is a function of
+the recent situation. That is right about a lot of players and wrong about
+several common ones, and when it is wrong no amount of encoder tuning rescues
+it, because the question being asked does not have the answer in it.
+
+So the memory is one voice on a panel (`lib/experts.ts`). Beside it sit four
+one-line hypotheses — you repeat, you rotate, you keep a winning move, you play
+what would have beaten the AI's last throw — and each round every member states
+a distribution. They are mixed in proportion to how well each has been calling
+your throws lately, using exponential weights.
+
+Three details carry the result:
+
+- **A share floor.** Plain exponential weights are optimal against a *fixed*
+  best expert: one that spends sixty rounds wrong decays to zero and can never
+  climb back, since its weight multiplies. Since the entire premise is players
+  who change, every member keeps a 1% stake and can be back at parity about
+  three rounds after it starts being right.
+- **Voting is sharper than tracking.** Standings are raised to a power before
+  they become vote shares. Tracking wants to be forgiving so a newly-correct
+  member is noticed; voting wants to commit, because a vote split across five
+  predictors that are each barely better than chance is worse than the best one
+  alone.
+- **The heuristics stand down against a memoryless player.** Every one of them
+  asks "given what just happened, what follows", so all four are useless against
+  someone whose next move does not depend on what just happened. `repeat` is the
+  trap: against a 60%-rock player it is right 44% of the time, comfortably
+  beating chance and clearing any track-record bar, while being far worse than
+  simply always saying rock — and it drags the vote off rock every time that
+  player throws something else. A skewed base rate is precisely the signal that
+  a player is memoryless, so the same **prior strength** above scales the
+  heuristics down. Without that gate the committee cost 3.4pp against that
+  player; with it, 0.2pp.
+
+The base rate is deliberately not a member of its own. It is already inside the
+memory's distribution, and running it again as an independent voice measured
+identically while counting the same evidence twice under two names.
+
 ### Confidence is not theater
 
 ```
@@ -250,22 +292,24 @@ averaged over 10 seeds. Chance is 33.3%.
 thrown most often. If the vector memory cannot beat that, it is not earning its
 complexity.
 
-`k-NN` is the memory vote on its own, `blend` mixes in the player's base rate,
-and `lean` is how much of the vote that base rate took. Both predictors are
-scored on the same games, so the two columns are a like-for-like comparison
-rather than numbers from separate runs.
+`blend` is the memory vote with the base rate mixed in, `panel` adds the
+committee on top, `gain` is what the committee bought, and `mem` is the memory's
+own share of that committee vote. Both predictors are scored on the same games,
+so the columns are a like-for-like comparison rather than numbers from separate
+runs.
 
-| Opponent | k-NN | blend | freq | delta | lean |
+| Opponent | blend | panel | freq | gain | mem |
 |---|---|---|---|---|---|
-| cyclic `R>P>S` | 100.0% | **100.0%** | 33.5% | +66.5pp | 0.8% |
-| win-stay lose-shift | 100.0% | **100.0%** | 0.0% | +100.0pp | 1.9% |
-| reacts to the AI's last move | 98.3% | **98.3%** | 33.0% | +65.2pp | 3.1% |
-| switches strategy at halfway | 96.5% | **96.5%** | 33.0% | +63.5pp | 1.2% |
-| frequency-biased (60% rock) | 52.7% | 59.0% | **59.3%** | −0.4pp | 62.4% |
-| genuinely random | 33.3% | 33.9% | 33.9% | +0.0pp | 28.2% |
-| **mean** | 80.1% | **81.3%** | 32.1% | | |
+| cyclic `R>P>S` | 100.0% | **100.0%** | 33.5% | +0.0pp | 97.6% |
+| win-stay lose-shift | 100.0% | **100.0%** | 33.5% | +0.0pp | 93.5% |
+| reacts to the AI's last move | 100.0% | **100.0%** | 0.0% | +0.0pp | 92.7% |
+| frequency-biased (60% rock) | 58.9% | 58.7% | **59.3%** | −0.2pp | 90.9% |
+| switches strategy at halfway | 96.1% | **98.3%** | 33.0% | **+2.2pp** | 91.1% |
+| restless (new tactic every 25) | 89.1% | **91.3%** | 36.1% | **+2.2pp** | 90.1% |
+| genuinely random | 32.8% | 33.4% | 33.9% | +0.6pp | 8.4% |
+| **mean** | 82.4% | **83.1%** | 32.8% | | |
 
-Four things worth reading off that table.
+Five things worth reading off that table.
 
 **It recovers from a strategy change.** The switching opponent still lands at
 96.5%, which is the answer to the obvious worry about a high-contrast metric:
@@ -287,10 +331,16 @@ while a tally keeps converging. Mixing the base rate into the vote closes it to
 **The blend costs nothing anywhere else**, which is a design property rather
 than a lucky result. A uniform prior shifts all three moves equally and so
 cannot change which one wins; against an unbiased opponent it is arithmetically
-inert no matter how much weight it carries. The `lean` column shows the rest of
-the mechanism working — the base rate takes 62% of the vote against the biased
-player and stays between 0.8% and 3.1% against the four it would only get in the
-way of.
+inert no matter how much weight it carries. It only bites when there is a real
+bias to exploit.
+
+**The committee earns its keep only on players who change**, which is exactly
+what it was added for and nothing else. It is worth +2.2pp against both the
+opponent that switches tactics once and the one that switches every 25 rounds,
+and worth precisely nothing against the four that never change — the memory
+already reads those at 100%, and there is nothing left to add. The honest
+reading of the `gain` column is that this is a narrow fix for a specific
+failure, not a general improvement.
 
 One caveat on all of these: scripted opponents demonstrate the mechanism, they
 do not say anything about humans. Against someone actively trying to vary,
@@ -317,6 +367,7 @@ lib/
   feature-embed.ts      context string → 57-d unit vector   ← the encoder
   predict.ts            pure weighting, confidence, sampling
   prior.ts              base-rate tally and how far to trust it
+  experts.ts            the committee: rival predictors, weighted by results
   score-control.ts      pure intent controller for Level and Yield
   commit.ts             pending commitments, hashing, one-shot semantics
   engine.ts             store lifecycle, commit and resolve
